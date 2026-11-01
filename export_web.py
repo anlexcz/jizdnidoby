@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Krok 3: vyrobí data pro web (data/web/*.json) z feedu, changes.csv a shape_log.csv."""
 import json
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -70,7 +71,7 @@ def segments():
                 if np.isnan(sd).any() or (np.diff(sd) < 0).any():
                     sd = None
         rows = list(g.itertuples())
-        for a, b in zip(rows, rows[1:]):
+        for n, (a, b) in enumerate(zip(rows, rows[1:])):
             k = f"{r.route_short_name}|{r.direction_id}|{a.stop_id}|{b.stop_id}"
             if k in out or a.stop_id not in stops.index or b.stop_id not in stops.index:
                 continue
@@ -86,11 +87,35 @@ def segments():
                 straight += 1
                 geom = np.array([[float(stops.at[s, "stop_lon"]), float(stops.at[s, "stop_lat"])]
                                  for s in (a.stop_id, b.stop_id)])
-            out[k] = {"k": k, "l": r.route_short_name, "d": r.direction_id,
+            out[k] = {"k": k, "l": r.route_short_name, "d": r.direction_id, "i": n,
                       "n": [stops.at[a.stop_id, "stop_name"], stops.at[b.stop_id, "stop_name"]],
                       "g": np.round(geom, 5).tolist()}
     print(f"Geometrie úseků: {len(out)} (z toho {straight} přímou čarou)")
     return [out[k] for k in sorted(out)]
+
+
+def current():
+    """Aktuální jízdní doby: pro každý typ dne (w = Po-Pá, s = So, n = Ne) nejbližší den z okna feedu."""
+    p = ts.DATA / "state" / "state.csv.gz"
+    if not p.exists():
+        return {"dates": {}, "v": {}}
+    df = pd.read_csv(p, dtype=str, keep_default_na=False)
+    df["hour"] = df["hour"].astype(int)
+    df["m"] = df["median_s"].astype(float).round().astype(int)
+    df["wd"] = pd.to_datetime(df["date"]).dt.weekday
+    today, dates, v = date.today().isoformat(), {}, {}
+    for t, f in {"w": lambda x: x < 5, "s": lambda x: x == 5, "n": lambda x: x == 6}.items():
+        sub = df[df["wd"].map(f)]
+        if sub.empty:
+            continue
+        future = sub[sub["date"] >= today]
+        d = sorted((future if len(future) else sub)["date"].unique())[0]
+        dates[t] = d
+        for r in sub[sub["date"] == d].itertuples():
+            if r.hour < 29:
+                arr = v.setdefault(f"{r.line}|{r.direction_id}|{r.stop_a_id}|{r.stop_b_id}", {}).setdefault(t, [0] * 29)
+                arr[r.hour] = r.m
+    return {"dates": dates, "v": v}
 
 
 def changes():
@@ -125,6 +150,7 @@ def run(zip_path):
     ts.unzip(zip_path)
     WEB.mkdir(parents=True, exist_ok=True)
     dump(segments(), "segments.json")
+    dump(current(), "current.json")
     ch = changes()
     dump(ch, "changes.json")
     dump(shapes(), "shapes.json")
