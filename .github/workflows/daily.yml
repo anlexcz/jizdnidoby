@@ -40,7 +40,9 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add data/changes.csv data/shape_log.csv data/shapes
+             for p in data/changes.csv data/shape_log.csv data/shapes; do
+     if [ -e "$p" ]; then git add "$p"; fi
+   done
           if git diff --cached --quiet; then
             echo "Žádné změny k uložení."
           else
