@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jízdní doby tramvají</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--bg:#f4f5f6;--ink:#1b1f23;--mute:#6a727b;--line:#dfe2e5;--up:#d93025;--down:#1e8e3e}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;font:15px/1.4 system-ui,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
+#side{width:370px;flex:none;display:flex;flex-direction:column;border-right:1px solid var(--line);min-height:0}
+#map{flex:1;min-width:0}
+.leaflet-tile-pane{filter:grayscale(1) contrast(.92) brightness(1.06)}
+header{padding:14px 16px 0}
+h1{font-size:18px;margin:0 0 10px;font-weight:650}
+nav{display:flex;gap:18px;border-bottom:1px solid var(--line)}
+nav button{all:unset;cursor:pointer;padding:6px 0 8px;color:var(--mute);border-bottom:2px solid transparent}
+nav button[aria-selected=true]{color:var(--ink);border-color:var(--ink)}
+#panel{flex:1;overflow:auto;padding:12px 16px 20px}
+button:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
+.seg{display:flex;gap:6px;margin:0 0 12px}
+.seg button{all:unset;cursor:pointer;padding:4px 10px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.seg button[aria-pressed=true]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.sum{display:flex;gap:16px;margin:0 0 12px;color:var(--mute)}
+.sum b{color:var(--ink);font-size:20px;margin-right:4px}
+.up{color:var(--up)}.down{color:var(--down)}
+.row{all:unset;display:flex;gap:10px;align-items:baseline;width:100%;padding:8px 0;border-top:1px solid var(--line);cursor:pointer}
+.row:hover{background:#eceef0}
+.tag{flex:none;min-width:30px;text-align:center;font-weight:650;background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+.row small,.note{color:var(--mute)}
+.row span.v{margin-left:auto;font-weight:650;white-space:nowrap}
+.grid{display:flex;flex-wrap:wrap;gap:6px}
+.grid button{all:unset;cursor:pointer;min-width:42px;text-align:center;padding:6px 8px;background:#fff;border:1px solid var(--line);border-radius:6px;font-weight:650}
+h2{font-size:15px;margin:16px 0 4px}
+.back{all:unset;cursor:pointer;color:var(--mute);margin-bottom:8px;display:inline-block}
+.pop b{font-weight:650}
+@media(max-width:760px){body{flex-direction:column-reverse}#side{width:100%;height:46%;border-right:0;border-top:1px solid var(--line)}#map{height:54%;flex:none}}
+</style>
+</head>
+<body>
+<aside id="side">
+  <header>
+    <h1>Jízdní doby tramvají</h1>
+    <nav role="tablist"><button role="tab" id="t-ov">Přehled</button><button role="tab" id="t-ln">Linky</button></nav>
+  </header>
+  <div id="panel"></div>
+</aside>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const map = L.map('map', {renderer: L.canvas({tolerance: 7})}).setView([50.08, 14.44], 12);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© přispěvatelé OpenStreetMap'}).addTo(map);
+const layer = L.layerGroup().addTo(map), extra = L.layerGroup().addTo(map);
+const D = {segs: [], ch: [], sh: []};
+let days = 7, tab = 'ov', line = null, byKey = new Map(), segByKey = new Map();
+
+const key = (l, d, a, b) => `${l}|${d}|${a}|${b}`;
+const iso = n => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+const fd = s => { const [, m, d] = s.split('-'); return `${+d}. ${+m}.`; };
+const fs = s => Math.abs(s) >= 60 ? `${+(Math.abs(s) / 60).toFixed(1)} min` : `${Math.abs(s)} s`;
+const sg = x => (x > 0 ? '+' : '−') + fs(x);
+const cls = x => x > 0 ? 'up' : 'down';
+const period = c => c.f === c.u ? fd(c.f) : `${fd(c.f)}–${fd(c.u)}`;
+const hours = c => c.h && c.h.length ? `, ${c.h[0]}${c.h.length > 1 ? '–' + c.h[c.h.length - 1] : ''} h` : '';
+const ll = g => g.map(p => [p[1], p[0]]);
+
+function desc(c) {
+  if (c.t === 'segment_added') return `nový úsek (${period(c)})`;
+  if (c.t === 'segment_removed') return `úsek zrušen (${period(c)})`;
+  return `${fs(c.o)} → ${fs(c.w)} <span class="${cls(c.x)}">${sg(c.x)}</span>, ${period(c)}${hours(c)}`;
+}
+
+function recent() {
+  const s0 = iso(days), best = new Map();
+  for (const c of D.ch) {
+    if (c.t !== 'time_changed' || c.on < s0) continue;
+    const k = key(c.l, c.d, c.a, c.b), b = best.get(k);
+    if (!b || Math.abs(c.x) > Math.abs(b.x)) best.set(k, c);
+  }
+  return best;
+}
+
+function drawMap() {
+  layer.clearLayers();
+  const best = recent(), base = [], hit = [];
+  for (const s of D.segs) {
+    const c = best.get(s.k), faded = line && s.l !== line;
+    const st = c ? {color: c.x > 0 ? '#d93025' : '#1e8e3e', weight: 5, opacity: faded ? .2 : Math.min(1, .55 + Math.abs(c.x) / 400)}
+                 : {color: '#6a727b', weight: 2, opacity: faded ? .1 : .45};
+    const p = L.polyline(ll(s.g), st);
+    p.on('click', e => popup(s, e.latlng));
+    (c ? hit : base).push(p);
+  }
+  [...base, ...hit].forEach(p => p.addTo(layer));
+}
+
+function popup(s, at) {
+  const cs = (byKey.get(s.k) || []).slice(-5).reverse();
+  const h = `<div class="pop"><b>Linka ${esc(s.l)}</b><br>${esc(s.n[0])} → ${esc(s.n[1])}` +
+    (cs.length ? '<br>' + cs.map(c => `<small>${fd(c.on)}: ${desc(c)}</small>`).join('<br>') : '<br><small>Beze změn.</small>') + '</div>';
+  L.popup().setLatLng(at).setContent(h).openOn(map);
+}
+
+function focus(k) {
+  const s = segByKey.get(k); if (!s) return;
+  const b = L.latLngBounds(ll(s.g));
+  map.fitBounds(b.pad(1.5), {maxZoom: 16});
+  popup(s, b.getCenter());
+}
+
+function rowHtml(c) {
+  const k = key(c.l, c.d, c.a, c.b);
+  return `<button class="row" data-k="${esc(k)}"><span class="tag">${esc(c.l)}</span><span>${esc(c.n[0])} → ${esc(c.n[1])}<br><small>${desc(c)}</small></span></button>`;
+}
+
+function overview() {
+  const best = recent(), top = [...best.values()].sort((a, b) => Math.abs(b.x) - Math.abs(a.x));
+  const up = top.filter(c => c.x > 0).length, dn = top.length - up;
+  $('#panel').innerHTML =
+    `<div class="seg" role="group" aria-label="Období">${[3, 7, 14, 30].map(n => `<button data-days="${n}" aria-pressed="${n === days}">${n} dní</button>`).join('')}</div>` +
+    (D.ch.length ? `<div class="sum"><span><b class="up">${up}</b>delší</span><span><b class="down">${dn}</b>kratší</span></div>` +
+      (top.length ? top.slice(0, 40).map(rowHtml).join('') : '<p class="note">V tomto období se jízdní doby nezměnily.</p>')
+      : '<p class="note">Zatím nebyla zjištěna žádná změna. Data se sbírají každý den a změny se objeví po prvním rozdílu mezi dvěma jízdními řády.</p>');
+}
+
+function lines() {
+  const ls = [...new Set(D.segs.map(s => s.l))].sort((a, b) => a.localeCompare(b, 'cs', {numeric: true}));
+  $('#panel').innerHTML = `<div class="grid">${ls.map(l => `<button data-line="${esc(l)}">${esc(l)}</button>`).join('')}</div>`;
+}
+
+function lineView() {
+  const cs = D.ch.filter(c => c.l === line).sort((a, b) => b.on.localeCompare(a.on));
+  const groups = {}; cs.forEach(c => (groups[c.on] ||= []).push(c));
+  const shapes = D.sh.filter(x => x.l === line);
+  $('#panel').innerHTML = `<button class="back" data-back>‹ Všechny linky</button><h2 style="margin-top:0">Linka ${esc(line)}</h2>` +
+    '<h2>Změny jízdních dob</h2>' +
+    (cs.length ? Object.entries(groups).map(([on, g]) => `<p class="note" style="margin:10px 0 0">Zjištěno ${fd(on)}</p>${g.map(rowHtml).join('')}`).join('') : '<p class="note">Zatím beze změn.</p>') +
+    '<h2>Verze trasy</h2>' + shapes.map(x => `<button class="row" data-shape="${x.h}"><span>Směr ${esc(x.d)}<br><small>od ${fd(x.first)}, naposledy ${fd(x.last)}</small></span><span class="v">zobrazit</span></button>`).join('');
+}
+
+async function showShape(h) {
+  const r = await fetch(`data/shapes/${h}.json`); if (!r.ok) return;
+  const g = await r.json(); extra.clearLayers();
+  const p = L.polyline(ll(g), {color: '#6d28d9', weight: 5}).addTo(extra);
+  map.fitBounds(p.getBounds().pad(.2));
+}
+
+function draw() {
+  $('#t-ov').setAttribute('aria-selected', tab === 'ov'); $('#t-ln').setAttribute('aria-selected', tab === 'ln');
+  tab === 'ov' ? overview() : line ? lineView() : lines();
+  drawMap();
+}
+
+$('#t-ov').onclick = () => { tab = 'ov'; line = null; extra.clearLayers(); draw(); };
+$('#t-ln').onclick = () => { tab = 'ln'; line = null; extra.clearLayers(); draw(); };
+$('#panel').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.days) { days = +b.dataset.days; draw(); }
+  else if (b.dataset.line) { line = b.dataset.line; draw(); }
+  else if ('back' in b.dataset) { line = null; extra.clearLayers(); draw(); }
+  else if (b.dataset.shape) showShape(b.dataset.shape);
+  else if (b.dataset.k) focus(b.dataset.k);
+};
+
+Promise.all(['segments', 'changes', 'shapes'].map(n => fetch(`data/web/${n}.json`).then(r => r.ok ? r.json() : []).catch(() => [])))
+  .then(([segs, ch, sh]) => {
+    D.segs = segs; D.ch = ch; D.sh = sh;
+    segs.forEach(s => segByKey.set(s.k, s));
+    ch.forEach(c => { const k = key(c.l, c.d, c.a, c.b); (byKey.get(k) || byKey.set(k, []).get(k)).push(c); });
+    if (segs.length) map.fitBounds(L.latLngBounds(segs.flatMap(s => ll(s.g))), {padding: [20, 20]});
+    draw();
+  });
+</script>
+</body>
+</html>
