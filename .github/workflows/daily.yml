@@ -2,8 +2,8 @@ name: Denní aktualizace
 
 on:
   schedule:
-    - cron: "45 4 * * *"   # 04:45 UTC = 05:45 (zima) / 06:45 (léto) v Praze; feed PID vzniká kolem 4:00-4:30 místního času
-  workflow_dispatch: {}      # tlačítko "Run workflow" pro ruční spuštění
+    - cron: "45 4 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -40,9 +40,9 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-             for p in data/changes.csv data/shape_log.csv data/shapes; do
-     if [ -e "$p" ]; then git add "$p"; fi
-   done
+          for p in data/changes.csv data/shape_log.csv data/shapes; do
+            if [ -e "$p" ]; then git add "$p"; fi
+          done
           if git diff --cached --quiet; then
             echo "Žádné změny k uložení."
           else
