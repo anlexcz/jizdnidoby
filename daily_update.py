@@ -16,6 +16,7 @@ import pandas as pd
 
 import export_web
 import feed_quality
+import shape_geometry as sg
 import tram_segments as ts
 
 STATE_DIR = ts.DATA / "state"
@@ -53,8 +54,6 @@ def load_state():
 def load_trip_state():
     if not TRIP_STATE.exists(): return None
     df = pd.read_csv(TRIP_STATE, dtype=str, keep_default_na=False)
-    # Stav v1 neměl stabilní klíče. Záměrně ho nepoužijeme pro porovnání,
-    # aby migrace sama nevytvořila falešné změny.
     if not {"stop_a_key", "stop_b_key"}.issubset(df.columns):
         print("Předchozí trip_state je ve formátu v1; proběhne bezpečná migrace bez detekce JD.")
         return None
@@ -63,58 +62,40 @@ def load_trip_state():
 
 
 def _stop_identity_map():
-    """GTFS stop_id -> stabilní identita fyzického sloupku PID.
-
-    PID publikuje asw_node_id a asw_stop_id právě jako číslo uzlu a sloupku.
-    Když chybí, konzervativně použijeme stop_id; neslučujeme podle názvu/polohy.
-    """
+    """GTFS stop_id -> stabilní identita fyzického sloupku PID."""
     header = pd.read_csv(ts.GTFS_DIR / "stops.txt", nrows=0, encoding="utf-8-sig").columns
     cols = ["stop_id"] + [c for c in ("asw_node_id", "asw_stop_id") if c in header]
     stops = ts.read("stops.txt", usecols=cols).drop_duplicates("stop_id")
     if {"asw_node_id", "asw_stop_id"}.issubset(stops.columns):
-        node = stops["asw_node_id"].astype(str).str.strip()
-        pole = stops["asw_stop_id"].astype(str).str.strip()
-        good = node.ne("") & pole.ne("")
-        stops["stable_key"] = stops["stop_id"]
+        node = stops["asw_node_id"].astype(str).str.strip(); pole = stops["asw_stop_id"].astype(str).str.strip()
+        good = node.ne("") & pole.ne(""); stops["stable_key"] = stops["stop_id"]
         stops.loc[good, "stable_key"] = "asw:" + node[good] + "/" + pole[good]
-    else:
-        stops["stable_key"] = stops["stop_id"]
+    else: stops["stable_key"] = stops["stop_id"]
     return stops.set_index("stop_id")["stable_key"]
 
 
 def compute_trip_state(trips: pd.DataFrame) -> pd.DataFrame:
-    trip_ids = set(trips["trip_id"])
-    cols = ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time"]
-    parts = []
+    trip_ids = set(trips["trip_id"]); cols = ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time"]; parts = []
     for chunk in pd.read_csv(ts.GTFS_DIR / "stop_times.txt", dtype=str, usecols=cols, keep_default_na=False, encoding="utf-8-sig", chunksize=500_000):
         x = chunk[chunk["trip_id"].isin(trip_ids)]
         if len(x): parts.append(x)
     base_cols = ["date","line","direction_id","stop_a_id","stop_b_id","stop_a_key","stop_b_key","dep_s","dur_s"]
     if not parts: return pd.DataFrame(columns=base_cols)
-    st = pd.concat(parts, ignore_index=True)
-    st["seq"] = pd.to_numeric(st["stop_sequence"], errors="coerce")
+    st = pd.concat(parts, ignore_index=True); st["seq"] = pd.to_numeric(st["stop_sequence"], errors="coerce")
     st["arr"] = ts.to_seconds(st["arrival_time"]); st["dep"] = ts.to_seconds(st["departure_time"])
-    st["arr"] = st["arr"].fillna(st["dep"]); st["dep"] = st["dep"].fillna(st["arr"])
-    st = st.sort_values(["trip_id", "seq"])
-    g = st.groupby("trip_id", sort=False)
-    st["stop_a_id"] = g["stop_id"].shift(1); st["dep_s"] = g["dep"].shift(1)
-    seg = st.dropna(subset=["stop_a_id", "dep_s", "arr"]).copy()
-    seg["dur_s"] = seg["arr"] - seg["dep_s"]
-    seg = seg[seg["dur_s"] >= 0].rename(columns={"stop_id": "stop_b_id"})
-    stable = _stop_identity_map()
-    seg["stop_a_key"] = seg["stop_a_id"].map(stable).fillna(seg["stop_a_id"])
-    seg["stop_b_key"] = seg["stop_b_id"].map(stable).fillna(seg["stop_b_id"])
+    st["arr"] = st["arr"].fillna(st["dep"]); st["dep"] = st["dep"].fillna(st["arr"]); st = st.sort_values(["trip_id", "seq"])
+    g = st.groupby("trip_id", sort=False); st["stop_a_id"] = g["stop_id"].shift(1); st["dep_s"] = g["dep"].shift(1)
+    seg = st.dropna(subset=["stop_a_id", "dep_s", "arr"]).copy(); seg["dur_s"] = seg["arr"] - seg["dep_s"]
+    seg = seg[seg["dur_s"] >= 0].rename(columns={"stop_id": "stop_b_id"}); stable = _stop_identity_map()
+    seg["stop_a_key"] = seg["stop_a_id"].map(stable).fillna(seg["stop_a_id"]); seg["stop_b_key"] = seg["stop_b_id"].map(stable).fillna(seg["stop_b_id"])
     seg = seg[["trip_id","stop_a_id","stop_b_id","stop_a_key","stop_b_key","dep_s","dur_s"]]
     seg = seg.merge(trips[["trip_id","service_id","line","direction_id"]], on="trip_id", how="inner")
-    sd = ts.service_dates(); sd = sd[sd["service_id"].isin(set(trips["service_id"]))].copy()
-    sd["date"] = pd.to_datetime(sd["date"]).dt.date.astype(str)
-    out = seg.merge(sd, on="service_id", how="inner")
-    return out[base_cols]
+    sd = ts.service_dates(); sd = sd[sd["service_id"].isin(set(trips["service_id"]))].copy(); sd["date"] = pd.to_datetime(sd["date"]).dt.date.astype(str)
+    return seg.merge(sd, on="service_id", how="inner")[base_cols]
 
 
 def _match_group(old, new):
-    old_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in old.itertuples()])
-    new_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in new.itertuples()])
+    old_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in old.itertuples()]); new_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in new.itertuples()])
     unused = set(range(len(new_rows))); matched = []
     for old_dep, old_dur in old_rows:
         candidates = [j for j in unused if abs(new_rows[j][0] - old_dep) <= MATCH_TOLERANCE_S]
@@ -129,8 +110,7 @@ def compare_trip_times(prev_trips, new_trips, new_hourly, today):
     if not common_dates: return pd.DataFrame(columns=CHANGE_COLS)
     p = prev_trips[prev_trips["date"].isin(common_dates)]; n = new_trips[new_trips["date"].isin(common_dates)]
     p_groups = {k:g for k,g in p.groupby(TRIP_PAIR, sort=False)}; n_groups = {k:g for k,g in n.groupby(TRIP_PAIR, sort=False)}
-    current_names = new_hourly.drop_duplicates(PAIR).set_index(PAIR)[["stop_a_name","stop_b_name"]]
-    rows = []
+    current_names = new_hourly.drop_duplicates(PAIR).set_index(PAIR)[["stop_a_name","stop_b_name"]]; rows = []
     for key in p_groups.keys() & n_groups.keys():
         matched = _match_group(p_groups[key], n_groups[key])
         if len(matched) < MIN_MATCHED_TRIPS: continue
@@ -142,17 +122,12 @@ def compare_trip_times(prev_trips, new_trips, new_hourly, today):
             if changed.empty: continue
             dominant = int(changed.value_counts().index[0]); supporting = [r for r in recs if round(r[4]) == dominant]
             if len(supporting) / len(recs) < MIN_CHANGED_SHARE: continue
-            date_s,line,direction,a_key,b_key = key
-            ng = n_groups[key]
-            # Výstup používá aktuální GTFS stop_id, aby zůstal kompatibilní s mapou.
-            a = ng["stop_a_id"].mode().iloc[0]; b = ng["stop_b_id"].mode().iloc[0]
+            date_s,line,direction,a_key,b_key = key; ng = n_groups[key]; a = ng["stop_a_id"].mode().iloc[0]; b = ng["stop_b_id"].mode().iloc[0]
             try:
                 nm = current_names.loc[(date_s,line,direction,a,b)]; a_name,b_name = nm["stop_a_name"],nm["stop_b_name"]
             except KeyError: a_name = b_name = ""
             old_s = float(pd.Series([r[2] for r in supporting]).median()); new_s = float(pd.Series([r[3] for r in supporting]).median())
-            rows.append({"detected_on":today,"date":date_s,"line":line,"direction_id":direction,
-                         "stop_a_id":a,"stop_a_name":a_name,"stop_b_id":b,"stop_b_name":b_name,"hour":hour,
-                         "old_s":old_s,"new_s":new_s,"diff_s":new_s-old_s,"kind":"time_changed"})
+            rows.append({"detected_on":today,"date":date_s,"line":line,"direction_id":direction,"stop_a_id":a,"stop_a_name":a_name,"stop_b_id":b,"stop_b_name":b_name,"hour":hour,"old_s":old_s,"new_s":new_s,"diff_s":new_s-old_s,"kind":"time_changed"})
     return pd.DataFrame(rows, columns=CHANGE_COLS)
 
 
@@ -160,8 +135,7 @@ def compare(prev, new, today, prev_trips=None, new_trips=None):
     common = set(prev["date"]) & set(new["date"])
     if not common:
         print("Staré a nové okno se nepřekrývají, není co porovnávat."); return pd.DataFrame(columns=CHANGE_COLS)
-    p = prev[prev["date"].isin(common)]; n = new[new["date"].isin(common)]
-    print(f"Porovnávám {len(common)} překrývajících se dnů.")
+    p = prev[prev["date"].isin(common)]; n = new[new["date"].isin(common)]; print(f"Porovnávám {len(common)} překrývajících se dnů.")
     if prev_trips is not None and new_trips is not None:
         time_changes = compare_trip_times(prev_trips,new_trips,new,today); print(f"Detekce podle spojů: {len(time_changes):,} potvrzených změn.")
     else:
@@ -179,24 +153,52 @@ def append_changes(changes):
     if not changes.empty: changes.to_csv(CHANGES,mode="a",header=not CHANGES.exists(),index=False,encoding="utf-8")
 
 
+def _load_shape_geometry(shape_hash):
+    f = SHAPES_DIR / f"{shape_hash}.json"
+    if not f.exists(): return None
+    try: return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return None
+
+
 def compute_shapes(trips, today):
-    sp=ts.GTFS_DIR/"shapes.txt"
-    if not sp.exists() or (trips["shape_id"]=="").all(): print("Feed neobsahuje shapes.txt, trasování přeskakuji."); return
-    used=set(trips["shape_id"])-{""}; cols=["shape_id","shape_pt_lat","shape_pt_lon","shape_pt_sequence"]; parts=[]
-    for chunk in pd.read_csv(sp,dtype=str,usecols=cols,keep_default_na=False,encoding="utf-8-sig",chunksize=500_000): parts.append(chunk[chunk["shape_id"].isin(used)])
-    sh=pd.concat(parts,ignore_index=True); sh["lat"]=pd.to_numeric(sh["shape_pt_lat"]).round(5); sh["lon"]=pd.to_numeric(sh["shape_pt_lon"]).round(5); sh["seq"]=pd.to_numeric(sh["shape_pt_sequence"]); sh=sh.sort_values(["shape_id","seq"])
-    id_to_hash={}; coords_by_hash={}
+    """Ukládá historii skutečných variant trasy, ne kosmetických redrawů GTFS."""
+    sp = ts.GTFS_DIR / "shapes.txt"
+    if not sp.exists() or (trips["shape_id"] == "").all():
+        print("Feed neobsahuje shapes.txt, trasování přeskakuji."); return
+    used = set(trips["shape_id"]) - {""}; cols = ["shape_id","shape_pt_lat","shape_pt_lon","shape_pt_sequence"]; parts = []
+    for chunk in pd.read_csv(sp,dtype=str,usecols=cols,keep_default_na=False,encoding="utf-8-sig",chunksize=500_000):
+        x = chunk[chunk["shape_id"].isin(used)]
+        if len(x): parts.append(x)
+    if not parts: return
+    sh = pd.concat(parts,ignore_index=True); sh["lat"] = pd.to_numeric(sh["shape_pt_lat"]); sh["lon"] = pd.to_numeric(sh["shape_pt_lon"]); sh["seq"] = pd.to_numeric(sh["shape_pt_sequence"]); sh = sh.sort_values(["shape_id","seq"])
+    id_to_raw = {}; coords_by_raw = {}
     for sid,g in sh.groupby("shape_id",sort=False):
-        coords=[[lon,lat] for lon,lat in zip(g["lon"],g["lat"])]; h=hashlib.sha1(json.dumps(coords).encode()).hexdigest()[:12]; id_to_hash[sid]=h; coords_by_hash[h]=coords
-    t=trips[trips["shape_id"].isin(id_to_hash)].copy(); t["shape_hash"]=t["shape_id"].map(id_to_hash); cur=t.groupby(["shape_hash","line","direction_id"]).size().rename("n_trips").reset_index()
-    log=pd.read_csv(SHAPE_LOG,dtype=str,keep_default_na=False) if SHAPE_LOG.exists() else pd.DataFrame(columns=["shape_hash","line","direction_id","first_seen","last_seen"])
-    k=["shape_hash","line","direction_id"]; merged=cur[k].merge(log,on=k,how="left"); is_new=merged["first_seen"].isna()|(merged["first_seen"]==""); new_rows=merged[is_new][k].assign(first_seen=today,last_seen=today)
-    log=log.merge(cur[k].assign(_now=True),on=k,how="left"); log.loc[log["_now"].notna(),"last_seen"]=today; log=pd.concat([log.drop(columns="_now"),new_rows],ignore_index=True); log.to_csv(SHAPE_LOG,index=False,encoding="utf-8")
-    SHAPES_DIR.mkdir(parents=True,exist_ok=True); written=0
-    for h in set(new_rows["shape_hash"]):
-        f=SHAPES_DIR/f"{h}.json"
-        if not f.exists(): f.write_text(json.dumps(coords_by_hash[h],separators=(",",":")),encoding="utf-8"); written+=1
-    print(f"Tvary tratí: {len(cur)} aktivních kombinací, nových {len(new_rows)}, nových souborů {written}.")
+        coords = [[round(float(lon),6),round(float(lat),6)] for lon,lat in zip(g["lon"],g["lat"])]
+        h = hashlib.sha1(json.dumps(coords,separators=(",",":")).encode()).hexdigest()[:12]; id_to_raw[sid] = h; coords_by_raw[h] = coords
+    t = trips[trips["shape_id"].isin(id_to_raw)].copy(); t["raw_hash"] = t["shape_id"].map(id_to_raw)
+    raw_cur = t.groupby(["raw_hash","line","direction_id"]).size().rename("n_trips").reset_index()
+    log = pd.read_csv(SHAPE_LOG,dtype=str,keep_default_na=False) if SHAPE_LOG.exists() else pd.DataFrame(columns=["shape_hash","line","direction_id","first_seen","last_seen"])
+    canonical_rows = []; equivalent_redraws = 0
+    for r in raw_cur.itertuples(index=False):
+        raw_hash,line,direction,n_trips = r.raw_hash,str(r.line),str(r.direction_id),r.n_trips; coords = coords_by_raw[raw_hash]; canonical = None
+        candidates = log[(log["line"].astype(str)==line) & (log["direction_id"].astype(str)==direction)].sort_values("last_seen",ascending=False)
+        for old in candidates.itertuples(index=False):
+            old_coords = _load_shape_geometry(old.shape_hash)
+            if old_coords is not None and sg.equivalent(coords, old_coords): canonical = old.shape_hash; break
+        if canonical is None: canonical = raw_hash
+        elif canonical != raw_hash: equivalent_redraws += 1
+        canonical_rows.append({"shape_hash":canonical,"line":line,"direction_id":direction,"n_trips":n_trips,"raw_hash":raw_hash})
+    cur = pd.DataFrame(canonical_rows)
+    k = ["shape_hash","line","direction_id"]; merged = cur[k].drop_duplicates().merge(log,on=k,how="left"); is_new = merged["first_seen"].isna() | (merged["first_seen"]=="")
+    new_rows = merged[is_new][k].assign(first_seen=today,last_seen=today)
+    log = log.merge(cur[k].drop_duplicates().assign(_now=True),on=k,how="left"); log.loc[log["_now"].notna(),"last_seen"] = today; log = pd.concat([log.drop(columns="_now"),new_rows],ignore_index=True); log.to_csv(SHAPE_LOG,index=False,encoding="utf-8")
+    SHAPES_DIR.mkdir(parents=True,exist_ok=True); written = 0
+    new_keys = set(new_rows["shape_hash"])
+    for r in cur.itertuples(index=False):
+        if r.shape_hash not in new_keys: continue
+        f = SHAPES_DIR / f"{r.shape_hash}.json"
+        if not f.exists(): f.write_text(json.dumps(coords_by_raw[r.raw_hash],separators=(",",":")),encoding="utf-8"); written += 1
+    print(f"Tvary tratí: {len(cur)} aktivních kombinací, skutečně nových {len(new_rows)}, kosmetických redrawů ignorováno {equivalent_redraws}, nových souborů {written}.")
 
 
 def main():
