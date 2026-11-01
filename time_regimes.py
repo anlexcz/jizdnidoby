@@ -1,112 +1,58 @@
-"""Seskupení potvrzených změn jízdních dob do časových a kalendářních režimů.
-
-Nejdřív vzniknou souvislé hodinové režimy pro jednotlivé datumy. Potom se
-stejný režim seskupí podle dnů, ve kterých byl skutečně potvrzen. Výstup tak
-umí rozlišit pracovní dny, soboty, neděle, víkendy, denní provoz i nepravidelný
-výběr konkrétních dnů bez toho, abychom si platnost domýšleli.
-"""
+"""Seskupení potvrzených hodinových změn do časových režimů a kalendářní platnosti."""
 import pandas as pd
 
-REGIME_COLS = [
-    "detected_on", "date", "line", "direction_id", "stop_a_id", "stop_a_name",
-    "stop_b_id", "stop_b_name", "start_hour", "end_hour", "old_s", "new_s", "diff_s",
-]
-GROUP = ["detected_on", "date", "line", "direction_id", "stop_a_id", "stop_a_name", "stop_b_id", "stop_b_name"]
-VALIDITY_COLS = [
-    "detected_on", "line", "direction_id", "stop_a_id", "stop_a_name", "stop_b_id", "stop_b_name",
-    "start_hour", "end_hour", "old_s", "new_s", "diff_s", "validity", "valid_from", "valid_to", "dates",
-]
-VALIDITY_GROUP = [
-    "detected_on", "line", "direction_id", "stop_a_id", "stop_a_name", "stop_b_id", "stop_b_name",
-    "start_hour", "end_hour", "old_s", "new_s", "diff_s",
-]
+EVIDENCE=["matched_trips","supporting_trips","support_share","diff_min_s","diff_max_s"]
+REGIME_COLS=["detected_on","date","line","direction_id","stop_a_id","stop_a_name","stop_b_id","stop_b_name","start_hour","end_hour","old_s","new_s","diff_s"]+EVIDENCE
+GROUP=["detected_on","date","line","direction_id","stop_a_id","stop_a_name","stop_b_id","stop_b_name"]
+VALIDITY_COLS=["detected_on","line","direction_id","stop_a_id","stop_a_name","stop_b_id","stop_b_name","start_hour","end_hour","old_s","new_s","diff_s","validity","valid_from","valid_to","dates"]+EVIDENCE
 
 
-def build(changes: pd.DataFrame) -> pd.DataFrame:
-    """Vrátí maximální souvislé časové režimy z potvrzených time_changed řádků."""
-    if changes is None or changes.empty or "kind" not in changes:
-        return pd.DataFrame(columns=REGIME_COLS)
-    x = changes[changes["kind"] == "time_changed"].copy()
-    if x.empty:
-        return pd.DataFrame(columns=REGIME_COLS)
-    for c in ("hour", "old_s", "new_s", "diff_s"):
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-    x = x.dropna(subset=["hour", "old_s", "new_s", "diff_s"])
-    x["hour"] = x["hour"].astype(int)
-    x["diff_key"] = x["diff_s"].round().astype(int)
-    rows = []
-    for key, g in x.groupby(GROUP, sort=False, dropna=False):
-        g = g.sort_values("hour")
-        run = []
-        for r in g.itertuples(index=False):
-            if run and (r.hour != run[-1].hour + 1 or r.diff_key != run[-1].diff_key):
-                rows.append(_row(key, run)); run = []
+def build(changes):
+    if changes is None or changes.empty or "kind" not in changes: return pd.DataFrame(columns=REGIME_COLS)
+    x=changes[changes["kind"]=="time_changed"].copy()
+    if x.empty: return pd.DataFrame(columns=REGIME_COLS)
+    for c in ("hour","old_s","new_s","diff_s")+tuple(EVIDENCE):
+        if c not in x: x[c]=""
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=["hour","old_s","new_s","diff_s"]); x["hour"]=x["hour"].astype(int); x["diff_key"]=x["diff_s"].round().astype(int); rows=[]
+    for key,g in x.groupby(GROUP,sort=False,dropna=False):
+        run=[]
+        for r in g.sort_values("hour").itertuples(index=False):
+            if run and (r.hour!=run[-1].hour+1 or r.diff_key!=run[-1].diff_key): rows.append(_row(key,run)); run=[]
             run.append(r)
-        if run: rows.append(_row(key, run))
-    return pd.DataFrame(rows, columns=REGIME_COLS)
+        if run: rows.append(_row(key,run))
+    return pd.DataFrame(rows,columns=REGIME_COLS)
 
 
-def _row(key, run):
-    old_s = float(pd.Series([r.old_s for r in run]).median())
-    new_s = float(pd.Series([r.new_s for r in run]).median())
-    out = dict(zip(GROUP, key))
-    out.update(start_hour=int(run[0].hour), end_hour=int(run[-1].hour) + 1,
-               old_s=old_s, new_s=new_s, diff_s=new_s-old_s)
-    return out
+def _row(key,run):
+    old=float(pd.Series([r.old_s for r in run]).median()); new=float(pd.Series([r.new_s for r in run]).median()); out=dict(zip(GROUP,key))
+    matched=sum(int(r.matched_trips) for r in run if pd.notna(r.matched_trips)); supporting=sum(int(r.supporting_trips) for r in run if pd.notna(r.supporting_trips))
+    mins=[r.diff_min_s for r in run if pd.notna(r.diff_min_s)]; maxs=[r.diff_max_s for r in run if pd.notna(r.diff_max_s)]
+    out.update(start_hour=int(run[0].hour),end_hour=int(run[-1].hour)+1,old_s=old,new_s=new,diff_s=new-old,matched_trips=matched,supporting_trips=supporting,support_share=(supporting/matched if matched else float("nan")),diff_min_s=min(mins) if mins else float("nan"),diff_max_s=max(maxs) if maxs else float("nan")); return out
 
 
-def _validity_label(dates):
-    """Popíše pouze takový kalendářní vzor, který data opravdu pokrývají."""
-    ds = sorted(pd.to_datetime(pd.Series(dates)).dt.normalize().unique())
+def _validity(dates):
+    ds=sorted(pd.to_datetime(list(dates))); w={d.weekday() for d in ds}
     if not ds: return "dates"
-    weekdays = {pd.Timestamp(d).weekday() for d in ds}
-    first, last = pd.Timestamp(ds[0]), pd.Timestamp(ds[-1])
-    calendar = pd.date_range(first, last, freq="D")
-    patterns = [
-        ("daily", set(range(7))),
-        ("weekdays", set(range(5))),
-        ("weekend", {5, 6}),
-        ("saturday", {5}),
-        ("sunday", {6}),
-    ]
-    actual = {pd.Timestamp(d) for d in ds}
-    for label, allowed in patterns:
-        expected = {d for d in calendar if d.weekday() in allowed}
-        if expected and actual == expected:
-            return label
+    span=pd.date_range(ds[0],ds[-1],freq="D"); present={d.date() for d in ds}
+    complete=lambda wanted: all((d.weekday() not in wanted) or (d.date() in present) for d in span)
+    if w==set(range(7)) and len(ds)==len(span): return "daily"
+    if w<=set(range(5)) and complete(set(range(5))): return "weekdays"
+    if w<={5,6} and complete({5,6}): return "weekend"
+    if w=={5} and complete({5}): return "saturday"
+    if w=={6} and complete({6}): return "sunday"
     return "dates"
 
 
-def build_validity(regimes: pd.DataFrame) -> pd.DataFrame:
-    """Sloučí stejné časové režimy přes datumy a odvodí jejich typ platnosti."""
-    if regimes is None or regimes.empty:
-        return pd.DataFrame(columns=VALIDITY_COLS)
-    x = regimes.copy()
-    for c in ("start_hour", "end_hour", "old_s", "new_s", "diff_s"):
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-    x = x.dropna(subset=["date", "start_hour", "end_hour", "old_s", "new_s", "diff_s"])
-    rows = []
-    for key, g in x.groupby(VALIDITY_GROUP, sort=False, dropna=False):
-        dates = sorted(set(g["date"].astype(str)))
-        out = dict(zip(VALIDITY_GROUP, key))
-        out.update(validity=_validity_label(dates), valid_from=dates[0], valid_to=dates[-1], dates=",".join(dates))
-        rows.append(out)
-    return pd.DataFrame(rows, columns=VALIDITY_COLS)
+def build_validity(regimes):
+    if regimes is None or regimes.empty: return pd.DataFrame(columns=VALIDITY_COLS)
+    base=["detected_on","line","direction_id","stop_a_id","stop_a_name","stop_b_id","stop_b_name","start_hour","end_hour","old_s","new_s","diff_s"]
+    rows=[]
+    for key,g in regimes.groupby(base,sort=False,dropna=False):
+        dates=sorted(set(g["date"].astype(str))); out=dict(zip(base,key)); matched=int(pd.to_numeric(g["matched_trips"],errors="coerce").fillna(0).sum()); supporting=int(pd.to_numeric(g["supporting_trips"],errors="coerce").fillna(0).sum())
+        mn=pd.to_numeric(g["diff_min_s"],errors="coerce"); mx=pd.to_numeric(g["diff_max_s"],errors="coerce")
+        out.update(validity=_validity(dates),valid_from=dates[0],valid_to=dates[-1],dates=",".join(dates),matched_trips=matched,supporting_trips=supporting,support_share=(supporting/matched if matched else float("nan")),diff_min_s=mn.min() if mn.notna().any() else float("nan"),diff_max_s=mx.max() if mx.notna().any() else float("nan")); rows.append(out)
+    return pd.DataFrame(rows,columns=VALIDITY_COLS)
 
 
-def build_validity_from_changes(changes: pd.DataFrame) -> pd.DataFrame:
-    return build_validity(build(changes))
-
-
-def append(path, changes: pd.DataFrame) -> int:
-    regimes = build(changes)
-    if regimes.empty: return 0
-    if path.exists():
-        old = pd.read_csv(path, dtype=str, keep_default_na=False)
-        combined = pd.concat([old, regimes.astype(str)], ignore_index=True)
-        key = ["detected_on", "date", "line", "direction_id", "stop_a_id", "stop_b_id", "start_hour", "end_hour", "diff_s"]
-        combined = combined.drop_duplicates(key, keep="last")
-        combined.to_csv(path, index=False, encoding="utf-8")
-    else:
-        regimes.to_csv(path, index=False, encoding="utf-8")
-    return len(regimes)
+def build_validity_from_changes(changes): return build_validity(build(changes))
