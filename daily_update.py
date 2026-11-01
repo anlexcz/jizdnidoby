@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import export_web
 import tram_segments as ts
 
 STATE_DIR = ts.DATA / "state"
@@ -166,29 +167,32 @@ def main():
     feed_hash = sha256(zip_path)
 
     prev_meta = json.loads(META.read_text()) if META.exists() else {}
-    if prev_meta.get("feed_sha256") == feed_hash:
+    same = prev_meta.get("feed_sha256") == feed_hash
+    if same and (ts.DATA / "web" / "segments.json").exists():
         print("Feed je identický s minulým během, nic se nemění.")
         return
 
-    new, trips = ts.compute(zip_path)
-    prev = load_state()
+    if not same:
+        new, trips = ts.compute(zip_path)
+        prev = load_state()
+        if prev is None:
+            print("\nPrvní běh: žádný předchozí stav, ukládám výchozí snímek (změny zatím nejsou).")
+            changes = pd.DataFrame(columns=CHANGE_COLS)
+        else:
+            changes = compare(prev, new, today)
+            print(f"Nalezených změn: {len(changes):,}")
+            if len(changes):
+                print(changes["kind"].value_counts().to_string())
+                print(changes.head(10).to_string(index=False))
+        append_changes(changes)
+        compute_shapes(trips, today)
 
-    if prev is None:
-        print("\nPrvní běh: žádný předchozí stav, ukládám výchozí snímek (změny zatím nejsou).")
-        changes = pd.DataFrame(columns=CHANGE_COLS)
-    else:
-        changes = compare(prev, new, today)
-        print(f"Nalezených změn: {len(changes):,}")
-        if len(changes):
-            print(changes["kind"].value_counts().to_string())
-            print(changes.head(10).to_string(index=False))
-    append_changes(changes)
-    compute_shapes(trips, today)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        new.to_csv(STATE, index=False, compression="gzip", encoding="utf-8")
+        META.write_text(json.dumps({"feed_sha256": feed_hash, "updated": today}))
+        print(f"\nStav uložen: {STATE} ({STATE.stat().st_size / 1e6:.1f} MB)")
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    new.to_csv(STATE, index=False, compression="gzip", encoding="utf-8")
-    META.write_text(json.dumps({"feed_sha256": feed_hash, "updated": today}))
-    print(f"\nStav uložen: {STATE} ({STATE.stat().st_size / 1e6:.1f} MB)")
+    export_web.run(zip_path)
 
 
 if __name__ == "__main__":
