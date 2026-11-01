@@ -1,0 +1,5 @@
+data/PID_GTFS.zip
+data/gtfs/
+data/out/
+data/state/
+__pycache__/
