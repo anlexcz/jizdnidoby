@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""
-Krok 2: denní porovnání.
+"""Denní porovnání PID GTFS.
 
-1. stáhne dnešní feed PID (nebo použije zip zadaný jako argument),
-2. spočítá jízdní doby úseků (tram_segments.compute),
-3. porovná s včerejším stavem (data/state/state.csv.gz) na dnech, které jsou v obou,
-4. přidá změny do data/changes.csv,
-5. zaznamená nové tvary tratí do data/shape_log.csv a data/shapes/<hash>.json,
-6. uloží nový stav do data/state/.
-
-Použití:
-    python daily_update.py               # stáhne feed
-    python daily_update.py feed.zip      # použije lokální zip (testování)
+Jízdní doby se detekují párováním konkrétních spojů mezi dvěma verzemi feedu.
+Hodinové mediány zůstávají stavem pro web, ale už nejsou zdrojem pravdy pro
+určení změny. Díky tomu samotný přesun spoje přes hranici hodiny nevytvoří
+falešnou změnu jízdní doby.
 """
 import hashlib
 import json
@@ -26,14 +19,19 @@ import tram_segments as ts
 
 STATE_DIR = ts.DATA / "state"
 STATE = STATE_DIR / "state.csv.gz"
+TRIP_STATE = STATE_DIR / "trip_state.csv.gz"
 META = STATE_DIR / "meta.json"
 CHANGES = ts.DATA / "changes.csv"
 SHAPE_LOG = ts.DATA / "shape_log.csv"
 SHAPES_DIR = ts.DATA / "shapes"
 
-THRESHOLD_S = 60  # změna jízdní doby od této hodnoty se považuje za změnu
+THRESHOLD_S = 60
+MATCH_TOLERANCE_S = 10 * 60
+MIN_MATCHED_TRIPS = 3
+MIN_CHANGED_SHARE = 0.80
 KEY = ["date", "line", "direction_id", "stop_a_id", "stop_b_id", "hour"]
 PAIR = ["date", "line", "direction_id", "stop_a_id", "stop_b_id"]
+TRIP_PAIR = ["date", "line", "direction_id", "stop_a_id", "stop_b_id"]
 CHANGE_COLS = ["detected_on", "date", "line", "direction_id", "stop_a_id", "stop_a_name",
                "stop_b_id", "stop_b_name", "hour", "old_s", "new_s", "diff_s", "kind"]
 
@@ -56,7 +54,129 @@ def load_state():
     return df
 
 
-def compare(prev: pd.DataFrame, new: pd.DataFrame, today: str) -> pd.DataFrame:
+def load_trip_state():
+    if not TRIP_STATE.exists():
+        return None
+    df = pd.read_csv(TRIP_STATE, dtype=str, keep_default_na=False)
+    for c in ["dep_s", "dur_s"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.dropna(subset=["dep_s", "dur_s"])
+
+
+def compute_trip_state(trips: pd.DataFrame) -> pd.DataFrame:
+    """Konkrétní plánované průjezdy úsekem pro každý kalendářní den feedu.
+
+    trip_id se záměrně neukládá jako identita mezi feedy. Pro porovnání se
+    používá linka, směr, fyzická dvojice stop_id a nejbližší čas odjezdu.
+    """
+    trip_ids = set(trips["trip_id"])
+    cols = ["trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time"]
+    parts = []
+    for chunk in pd.read_csv(ts.GTFS_DIR / "stop_times.txt", dtype=str, usecols=cols,
+                             keep_default_na=False, encoding="utf-8-sig", chunksize=500_000):
+        x = chunk[chunk["trip_id"].isin(trip_ids)]
+        if len(x):
+            parts.append(x)
+    if not parts:
+        return pd.DataFrame(columns=TRIP_PAIR + ["dep_s", "dur_s"])
+    st = pd.concat(parts, ignore_index=True)
+    st["seq"] = pd.to_numeric(st["stop_sequence"], errors="coerce")
+    st["arr"] = ts.to_seconds(st["arrival_time"])
+    st["dep"] = ts.to_seconds(st["departure_time"])
+    st["arr"] = st["arr"].fillna(st["dep"])
+    st["dep"] = st["dep"].fillna(st["arr"])
+    st = st.sort_values(["trip_id", "seq"])
+    g = st.groupby("trip_id", sort=False)
+    st["stop_a_id"] = g["stop_id"].shift(1)
+    st["dep_s"] = g["dep"].shift(1)
+    seg = st.dropna(subset=["stop_a_id", "dep_s", "arr"]).copy()
+    seg["dur_s"] = seg["arr"] - seg["dep_s"]
+    seg = seg[seg["dur_s"] >= 0].rename(columns={"stop_id": "stop_b_id"})
+    seg = seg[["trip_id", "stop_a_id", "stop_b_id", "dep_s", "dur_s"]]
+    seg = seg.merge(trips[["trip_id", "service_id", "line", "direction_id"]], on="trip_id", how="inner")
+
+    sd = ts.service_dates()
+    sd = sd[sd["service_id"].isin(set(trips["service_id"]))].copy()
+    sd["date"] = pd.to_datetime(sd["date"]).dt.date.astype(str)
+    out = seg.merge(sd, on="service_id", how="inner")
+    return out[["date", "line", "direction_id", "stop_a_id", "stop_b_id", "dep_s", "dur_s"]]
+
+
+def _match_group(old: pd.DataFrame, new: pd.DataFrame):
+    """Jednoznačně spáruje spoje podle nejbližšího odjezdu v toleranci."""
+    old_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in old.itertuples()])
+    new_rows = sorted([(float(r.dep_s), float(r.dur_s)) for r in new.itertuples()])
+    unused = set(range(len(new_rows)))
+    matched = []
+    for old_dep, old_dur in old_rows:
+        candidates = [j for j in unused if abs(new_rows[j][0] - old_dep) <= MATCH_TOLERANCE_S]
+        if not candidates:
+            continue
+        j = min(candidates, key=lambda x: (abs(new_rows[x][0] - old_dep), new_rows[x][0]))
+        unused.remove(j)
+        new_dep, new_dur = new_rows[j]
+        matched.append((old_dep, new_dep, old_dur, new_dur, new_dur - old_dur))
+    return matched
+
+
+def compare_trip_times(prev_trips: pd.DataFrame, new_trips: pd.DataFrame,
+                       new_hourly: pd.DataFrame, today: str) -> pd.DataFrame:
+    """Detekuje skutečnou změnu JD z odpovídajících spojů, ne z hodinového mediánu.
+
+    Změnu zapíšeme jen pokud jsou alespoň MIN_MATCHED_TRIPS odpovídající spoje
+    a alespoň MIN_CHANGED_SHARE z nich má stejnou dominantní změnu >= 60 s.
+    Párování probíhá přes celý den, takže posun 12:59 -> 13:01 nezpůsobí změnu
+    jen kvůli přechodu mezi hodinovými buckety.
+    """
+    common_dates = set(prev_trips["date"]) & set(new_trips["date"])
+    if not common_dates:
+        return pd.DataFrame(columns=CHANGE_COLS)
+    p = prev_trips[prev_trips["date"].isin(common_dates)]
+    n = new_trips[new_trips["date"].isin(common_dates)]
+    p_groups = {k: g for k, g in p.groupby(TRIP_PAIR, sort=False)}
+    n_groups = {k: g for k, g in n.groupby(TRIP_PAIR, sort=False)}
+    names = new_hourly.drop_duplicates(PAIR).set_index(PAIR)[["stop_a_name", "stop_b_name"]]
+    rows = []
+
+    for key in p_groups.keys() & n_groups.keys():
+        matched = _match_group(p_groups[key], n_groups[key])
+        if len(matched) < MIN_MATCHED_TRIPS:
+            continue
+
+        # Režimy posuzujeme po hodině původního odjezdu, ale párujeme přes celý den.
+        by_hour = {}
+        for rec in matched:
+            hour = int(rec[0] // 3600)
+            by_hour.setdefault(hour, []).append(rec)
+        for hour, recs in by_hour.items():
+            if len(recs) < MIN_MATCHED_TRIPS:
+                continue
+            diffs = pd.Series([round(r[4]) for r in recs], dtype="int64")
+            changed = diffs[diffs.abs() >= THRESHOLD_S]
+            if changed.empty:
+                continue
+            dominant = int(changed.value_counts().index[0])
+            supporting = [r for r in recs if round(r[4]) == dominant]
+            if len(supporting) / len(recs) < MIN_CHANGED_SHARE:
+                continue
+            old_s = float(pd.Series([r[2] for r in supporting]).median())
+            new_s = float(pd.Series([r[3] for r in supporting]).median())
+            date_s, line, direction, a, b = key
+            try:
+                nm = names.loc[key]
+                a_name, b_name = nm["stop_a_name"], nm["stop_b_name"]
+            except KeyError:
+                a_name = b_name = ""
+            rows.append({"detected_on": today, "date": date_s, "line": line,
+                         "direction_id": direction, "stop_a_id": a, "stop_a_name": a_name,
+                         "stop_b_id": b, "stop_b_name": b_name, "hour": hour,
+                         "old_s": old_s, "new_s": new_s, "diff_s": new_s - old_s,
+                         "kind": "time_changed"})
+    return pd.DataFrame(rows, columns=CHANGE_COLS)
+
+
+def compare(prev: pd.DataFrame, new: pd.DataFrame, today: str,
+            prev_trips=None, new_trips=None) -> pd.DataFrame:
     common = set(prev["date"]) & set(new["date"])
     if not common:
         print("Staré a nové okno se nepřekrývají, není co porovnávat.")
@@ -65,19 +185,15 @@ def compare(prev: pd.DataFrame, new: pd.DataFrame, today: str) -> pd.DataFrame:
     n = new[new["date"].isin(common)]
     print(f"Porovnávám {len(common)} překrývajících se dnů.")
 
-    # 1) změna jízdní doby: úsek existoval v obou verzích ve stejné hodině
-    m = p.merge(n, on=KEY, how="inner", suffixes=("_old", "_new"))
-    m["diff_s"] = m["median_s_new"] - m["median_s_old"]
-    ch = m[m["diff_s"].abs() >= THRESHOLD_S].copy()
-    time_changes = pd.DataFrame({
-        "detected_on": today, "date": ch["date"], "line": ch["line"],
-        "direction_id": ch["direction_id"],
-        "stop_a_id": ch["stop_a_id"], "stop_a_name": ch["stop_a_name_new"],
-        "stop_b_id": ch["stop_b_id"], "stop_b_name": ch["stop_b_name_new"],
-        "hour": ch["hour"], "old_s": ch["median_s_old"], "new_s": ch["median_s_new"],
-        "diff_s": ch["diff_s"], "kind": "time_changed"})
+    if prev_trips is not None and new_trips is not None:
+        time_changes = compare_trip_times(prev_trips, new_trips, new, today)
+        print(f"Detekce podle spojů: {len(time_changes):,} potvrzených změn.")
+    else:
+        # První běh po nasazení nové metodiky: nevyrábíme změny z méně spolehlivého
+        # hodinového mediánu. Od dalšího feedu už bude trip_state k dispozici.
+        print("Předchozí stav spojů chybí; změny jízdních dob tento běh nepřidávám.")
+        time_changes = pd.DataFrame(columns=CHANGE_COLS)
 
-    # 2) úsek přibyl nebo zmizel (na celý den, bez ohledu na hodinu)
     names = ["stop_a_name", "stop_b_name"]
     po = p[PAIR + names].drop_duplicates(PAIR)
     pn = n[PAIR + names].drop_duplicates(PAIR)
@@ -107,7 +223,6 @@ def append_changes(changes: pd.DataFrame):
 
 
 def compute_shapes(trips: pd.DataFrame, today: str):
-    """Zaznamená tvary tratí. Tvar = otisk souřadnic (5 desetinných míst, cca 1 m)."""
     sp = ts.GTFS_DIR / "shapes.txt"
     if not sp.exists() or (trips["shape_id"] == "").all():
         print("Feed neobsahuje shapes.txt, trasování přeskakuji.")
@@ -123,19 +238,15 @@ def compute_shapes(trips: pd.DataFrame, today: str):
     sh["lon"] = pd.to_numeric(sh["shape_pt_lon"]).round(5)
     sh["seq"] = pd.to_numeric(sh["shape_pt_sequence"])
     sh = sh.sort_values(["shape_id", "seq"])
-
     id_to_hash, coords_by_hash = {}, {}
     for sid, g in sh.groupby("shape_id", sort=False):
         coords = [[lon, lat] for lon, lat in zip(g["lon"], g["lat"])]
         h = hashlib.sha1(json.dumps(coords).encode()).hexdigest()[:12]
         id_to_hash[sid] = h
         coords_by_hash[h] = coords
-
     t = trips[trips["shape_id"].isin(id_to_hash)].copy()
     t["shape_hash"] = t["shape_id"].map(id_to_hash)
-    cur = (t.groupby(["shape_hash", "line", "direction_id"]).size()
-           .rename("n_trips").reset_index())
-
+    cur = t.groupby(["shape_hash", "line", "direction_id"]).size().rename("n_trips").reset_index()
     if SHAPE_LOG.exists():
         log = pd.read_csv(SHAPE_LOG, dtype=str, keep_default_na=False)
     else:
@@ -144,12 +255,10 @@ def compute_shapes(trips: pd.DataFrame, today: str):
     merged = cur[k].merge(log, on=k, how="left")
     is_new = merged["first_seen"].isna() | (merged["first_seen"] == "")
     new_rows = merged[is_new][k].assign(first_seen=today, last_seen=today)
-    # last_seen aktualizujeme u všech, které jsou v dnešním feedu
     log = log.merge(cur[k].assign(_now=True), on=k, how="left")
     log.loc[log["_now"].notna(), "last_seen"] = today
     log = pd.concat([log.drop(columns="_now"), new_rows], ignore_index=True)
     log.to_csv(SHAPE_LOG, index=False, encoding="utf-8")
-
     SHAPES_DIR.mkdir(parents=True, exist_ok=True)
     written = 0
     for h in set(new_rows["shape_hash"]):
@@ -157,15 +266,13 @@ def compute_shapes(trips: pd.DataFrame, today: str):
         if not f.exists():
             f.write_text(json.dumps(coords_by_hash[h], separators=(",", ":")), encoding="utf-8")
             written += 1
-    print(f"Tvary tratí: {len(cur)} aktivních kombinací, nových {len(new_rows)}, "
-          f"nových souborů {written}.")
+    print(f"Tvary tratí: {len(cur)} aktivních kombinací, nových {len(new_rows)}, nových souborů {written}.")
 
 
 def main():
     today = date.today().isoformat()
     zip_path = ts.get_feed(sys.argv)
     feed_hash = sha256(zip_path)
-
     prev_meta = json.loads(META.read_text()) if META.exists() else {}
     same = prev_meta.get("feed_sha256") == feed_hash
     if same and (ts.DATA / "web" / "segments.json").exists():
@@ -174,23 +281,25 @@ def main():
 
     if not same:
         new, trips = ts.compute(zip_path)
+        new_trips = compute_trip_state(trips)
         prev = load_state()
+        prev_trips = load_trip_state()
         if prev is None:
-            print("\nPrvní běh: žádný předchozí stav, ukládám výchozí snímek (změny zatím nejsou).")
+            print("\nPrvní běh: ukládám výchozí snímek.")
             changes = pd.DataFrame(columns=CHANGE_COLS)
         else:
-            changes = compare(prev, new, today)
+            changes = compare(prev, new, today, prev_trips, new_trips)
             print(f"Nalezených změn: {len(changes):,}")
             if len(changes):
                 print(changes["kind"].value_counts().to_string())
-                print(changes.head(10).to_string(index=False))
         append_changes(changes)
         compute_shapes(trips, today)
-
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         new.to_csv(STATE, index=False, compression="gzip", encoding="utf-8")
-        META.write_text(json.dumps({"feed_sha256": feed_hash, "updated": today}))
-        print(f"\nStav uložen: {STATE} ({STATE.stat().st_size / 1e6:.1f} MB)")
+        new_trips.to_csv(TRIP_STATE, index=False, compression="gzip", encoding="utf-8")
+        META.write_text(json.dumps({"feed_sha256": feed_hash, "updated": today,
+                                    "detector": "matched-trips-v1"}))
+        print(f"\nStav uložen: {STATE}; stav spojů: {TRIP_STATE}")
 
     export_web.run(zip_path)
 
