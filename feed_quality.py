@@ -50,8 +50,13 @@ def validate(hourly: pd.DataFrame, trip_state: pd.DataFrame,
         med = pd.to_numeric(hourly["median_s"], errors="coerce")
         if med.isna().any():
             r.errors.append("Některé agregované jízdní doby nejsou číselné.")
-        if (med <= 0).any():
-            r.errors.append("Feed obsahuje nulovou nebo zápornou jízdní dobu.")
+        negative = int((med < 0).sum())
+        zero = int((med == 0).sum())
+        r.metrics["nulových agregovaných jízdních dob"] = zero
+        if negative:
+            r.errors.append(f"Feed obsahuje {negative} záporných agregovaných jízdních dob.")
+        if zero:
+            r.warnings.append(f"Feed obsahuje {zero} nulových agregovaných jízdních dob; jsou ponechány jako platné, ale podezřelé.")
         absurd = int((med > 30 * 60).sum())
         if absurd:
             r.warnings.append(f"{absurd} úseků má plánovanou jízdní dobu přes 30 minut.")
@@ -61,8 +66,13 @@ def validate(hourly: pd.DataFrame, trip_state: pd.DataFrame,
         dep = pd.to_numeric(trip_state["dep_s"], errors="coerce")
         if dur.isna().any() or dep.isna().any():
             r.errors.append("Stav spojů obsahuje nečíselný čas.")
-        if (dur <= 0).any():
-            r.errors.append("Stav spojů obsahuje nulovou nebo zápornou jízdní dobu.")
+        negative = int((dur < 0).sum())
+        zero = int((dur == 0).sum())
+        r.metrics["nulových průjezdů úsekem"] = zero
+        if negative:
+            r.errors.append(f"Stav spojů obsahuje {negative} záporných jízdních dob.")
+        if zero:
+            r.warnings.append(f"Stav spojů obsahuje {zero} nulových jízdních dob; jsou ponechány jako platné, ale podezřelé.")
         if (dep < 0).any() or (dep >= 36 * 3600).any():
             r.errors.append("Stav spojů obsahuje odjezd mimo očekávaný rozsah 00:00–35:59.")
 
