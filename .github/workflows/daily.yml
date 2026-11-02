@@ -35,6 +35,12 @@ jobs:
           fi
       - name: Spočítat, zkontrolovat a porovnat
         run: python daily_update_v3.py
+      - name: Zapsat úspěšné načtení a stav dat
+        run: |
+          day=$(date -u +%F)
+          if [ ! -f data/run_log.csv ]; then echo "date" > data/run_log.csv; fi
+          grep -qx "$day" data/run_log.csv || echo "$day" >> data/run_log.csv
+          python export_status.py
       - name: Uložit nový stav
         run: |
           test -f data/state/state.csv.gz
@@ -46,7 +52,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          for p in data/changes.csv data/evidence.csv data/shape_log.csv data/shapes data/web; do
+          for p in data/changes.csv data/evidence.csv data/shape_log.csv data/shapes data/web data/run_log.csv; do
             if [ -e "$p" ]; then git add "$p"; fi
           done
           if git diff --cached --quiet; then
