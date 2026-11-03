@@ -127,8 +127,10 @@ function allLines() {
 
 async function ensureLines(lines) {
   const wanted = [...new Set((lines || []).filter(Boolean).map(String))];
-  if (!wanted.length) return;
 
+  // Před prvním rebuild exportem segment_index.json ještě nemusí existovat.
+  // V tom případě načteme jednou původní monolitický soubor – i když zatím
+  // nejsou žádné detekované events, protože ho potřebují Aktuální JD a Historie.
   if (!D.segmentIndex?.lines) {
     if (!legacyGeometryLoaded) {
       addSegments(await loadJson('data/web/segments.json', [], true));
@@ -138,6 +140,7 @@ async function ensureLines(lines) {
     return;
   }
 
+  if (!wanted.length) return;
   const jobs = [];
   for (const line of wanted) {
     if (loadedLines.has(line)) continue;
@@ -287,8 +290,13 @@ function historyRows(path, line, direction) {
 
 async function showHistory(values = {}) {
   const line = values.line || allLines()[0] || '';
-  await ensureLines([line]);
-  renderHistory({ ...values, line });
+  if (!line && !D.segmentIndex?.lines) {
+    await ensureLines([]);
+  } else {
+    await ensureLines([line]);
+  }
+  const resolvedLine = line || allLines()[0] || '';
+  renderHistory({ ...values, line: resolvedLine });
 }
 
 function renderHistory(values = {}) {
@@ -422,6 +430,7 @@ async function setView(view) {
       await ensureLines(D.events.map((event) => event.l));
       renderChanges();
     } else if (view === 'current') {
+      if (!D.segmentIndex?.lines && !legacyGeometryLoaded) await ensureLines([]);
       await ensureLines(allLines());
       renderCurrent();
     } else {
