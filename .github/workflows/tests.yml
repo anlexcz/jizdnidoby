@@ -26,7 +26,7 @@ jobs:
         run: node --check app.js
 
   pipeline-smoke:
-    if: github.ref == 'refs/heads/clean-rebuild'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
