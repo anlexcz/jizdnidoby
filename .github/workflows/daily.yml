@@ -7,6 +7,12 @@ on:
     - cron: "37 4 * * *"
     - cron: "07 6 * * *"
   workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "*.py"
+      - ".github/workflows/daily.yml"
+      - "requirements.txt"
 
 permissions:
   contents: write
