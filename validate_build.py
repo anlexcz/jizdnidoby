@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail closed before publishing a newly computed state.
 
-This validation intentionally does not rewrite or migrate historical data. It only
-checks that the state and public web export are internally usable before the
-workflow uploads the state release and commits generated files.
+The validator never migrates or rewrites historical evidence. It checks the new
+working snapshot and derived web export before the workflow uploads state or
+commits generated data.
 """
 from __future__ import annotations
 
@@ -51,6 +51,37 @@ def validate_state() -> None:
         raise SystemExit("meta.json neobsahuje identitu feedu nebo datum aktualizace.")
 
 
+def validate_segment_shards(legacy_segments: list) -> None:
+    index = read_json(WEB / "segment_index.json")
+    if index.get("version") != 1 or not isinstance(index.get("lines"), dict):
+        raise SystemExit("segment_index.json nemá podporovaný formát.")
+
+    total = 0
+    seen_keys = set()
+    for line, entry in index["lines"].items():
+        if not isinstance(entry, dict) or not entry.get("file"):
+            raise SystemExit(f"Neplatný záznam geometrie linky {line}.")
+        shard_path = WEB / entry["file"]
+        shard = read_json(shard_path)
+        if not isinstance(shard, list) or not shard:
+            raise SystemExit(f"Shard geometrie linky {line} je prázdný.")
+        if entry.get("count") != len(shard):
+            raise SystemExit(f"Nesedí počet úseků v geometrickém shardu linky {line}.")
+        for segment in shard:
+            if str(segment.get("l", "")) != str(line):
+                raise SystemExit(f"Shard linky {line} obsahuje úsek jiné linky.")
+            segment_key = segment.get("k")
+            if not segment_key or segment_key in seen_keys:
+                raise SystemExit(f"Duplicitní nebo chybějící klíč úseku v shardu linky {line}.")
+            seen_keys.add(segment_key)
+        total += len(shard)
+
+    if total != len(legacy_segments) or index.get("count") != total:
+        raise SystemExit(
+            f"Shardy geometrie nejsou úplné: shardy={total}, legacy={len(legacy_segments)}, index={index.get('count')}"
+        )
+
+
 def validate_web() -> None:
     current = read_json(WEB / "current.json")
     segments = read_json(WEB / "segments.json")
@@ -63,6 +94,7 @@ def validate_web() -> None:
         raise SystemExit("segments.json je prázdný nebo nemá očekávaný formát.")
     if not isinstance(current, dict) or not isinstance(current.get("v"), dict):
         raise SystemExit("current.json nemá očekávaný formát.")
+    validate_segment_shards(segments)
 
     # Historické geometrie jsou append-only archiv. Záznam v logu nesmí ukazovat
     # na neexistující soubor; validátor ale žádný starý soubor nemaže ani nepřepisuje.
