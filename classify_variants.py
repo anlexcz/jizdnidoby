@@ -74,12 +74,7 @@ def _depot_match(name: str, depot_points: dict[str, list[dict]], start: bool) ->
 
 
 def classify_rows(rows: pd.DataFrame, depot_points: dict[str, list[dict]]) -> pd.DataFrame:
-    """Classify pre-aggregated service-day variant rows.
-
-    Required columns: service_date,line,direction_id,route_variant_id,trip_count,
-    clean_trip_count,operational_trip_count,first_stop_name,last_stop_name,is_night,
-    operation_patterns.
-    """
+    """Classify pre-aggregated service-day variant rows."""
     df = rows.copy()
     if df.empty:
         return df
@@ -102,7 +97,6 @@ def classify_rows(rows: pd.DataFrame, depot_points: dict[str, list[dict]]) -> pd
         patterns = str(r.operation_patterns).split("|") if str(r.operation_patterns) else []
         explicit, explicit_reason = explicit_classification(patterns)
 
-        # If the variant has no clean regular trips, explicit GTFS semantics win.
         if int(r.clean_trip_count) == 0 and int(r.operational_trip_count) > 0:
             classifications.append((explicit or "operational", "explicit", explicit_reason or "non-regular GTFS operation"))
             continue
@@ -113,20 +107,17 @@ def classify_rows(rows: pd.DataFrame, depot_points: dict[str, list[dict]]) -> pd
         share = float(r.clean_share)
         clean_count = int(r.clean_trip_count)
 
-        # Stable variants first. This protects normal routes terminating at depots.
-        if prevalence >= 0.5 and share >= (0.15 if night else 0.20):
+        # Base must be genuinely recurrent, not merely 1 of 2 observed days.
+        if seen_days >= 2 and prevalence >= 0.5 and share >= (0.15 if night else 0.20):
             classifications.append(("regular_base", "strong", f"clean variant on {seen_days}/{total_days} days; share={share:.2f}"))
             continue
 
-        # A substantial variant of one specific service day is regular for that day,
-        # even if it exists only during a diversion or temporary timetable.
         min_count = 2 if night else 3
         min_share = 0.20 if night else 0.15
         if clean_count >= min_count and share >= min_share:
             classifications.append(("regular_day_variant", "strong", f"substantial clean service-day variant; trips={clean_count}; share={share:.2f}"))
             continue
 
-        # Hidden depot runs: only after regular variants have been excluded.
         start_point = _depot_match(r.first_stop_name, depot_points, True)
         end_point = _depot_match(r.last_stop_name, depot_points, False)
         low_volume = clean_count <= (2 if night else max(2, math.ceil(float(r.group_clean_total) * 0.20)))
@@ -142,8 +133,6 @@ def classify_rows(rows: pd.DataFrame, depot_points: dict[str, list[dict]]) -> pd
             classifications.append(("depot_in", confidence, f"clean low-volume variant ends at {end_point['depot_name']} access point {r.last_stop_name}; trips={clean_count}"))
             continue
 
-        # Mixed clean + explicit operational use of the same sequence remains a
-        # clean classification candidate; retain explicit evidence in the reason.
         suffix = f"; also operational patterns={r.operation_patterns}" if int(r.operational_trip_count) else ""
         classifications.append(("unknown", "unknown", f"insufficient evidence; trips={clean_count}; share={share:.2f}; prevalence={prevalence:.2f}{suffix}"))
 
