@@ -58,6 +58,9 @@ jobs:
       - name: Spočítat, zkontrolovat a porovnat
         run: python daily_update.py
 
+      - name: Archivovat publikovaný GTFS
+        run: python archive_gtfs.py
+
       - name: Archivovat jízdní řády pro historii
         run: python export_timetables.py
 
@@ -84,7 +87,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          for p in data/changes.csv data/evidence.csv data/shape_log.csv data/shapes data/web data/run_log.csv; do
+          for p in data/changes.csv data/evidence.csv data/shape_log.csv data/shapes data/archive data/history data/web data/run_log.csv; do
             if [ -e "$p" ]; then git add "$p"; fi
           done
           if git diff --cached --quiet; then
