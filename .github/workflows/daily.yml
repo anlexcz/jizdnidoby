@@ -58,6 +58,9 @@ jobs:
       - name: Spočítat, zkontrolovat a porovnat
         run: python daily_update.py
 
+      - name: Archivovat jízdní řády pro historii
+        run: python export_timetables.py
+
       - name: Připravit webové geometrie
         run: python split_segments.py
 
