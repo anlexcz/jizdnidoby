@@ -52,6 +52,9 @@ jobs:
       - name: Spočítat, zkontrolovat a porovnat
         run: python daily_update.py
 
+      - name: Připravit webové geometrie
+        run: python split_segments.py
+
       - name: Ověřit nový stav a webová data
         run: python validate_build.py
 
