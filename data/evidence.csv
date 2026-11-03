@@ -1,0 +1,3 @@
+detected_on,date,line,direction_id,stop_a_id,stop_b_id,hour,matched_trips,supporting_trips,support_share,diff_min_s,diff_max_s
+2026-11-01,2026-11-02,17,0,U237Z1-new,U238Z1-new,12,5,5,1.0,60,60
+2026-11-01,2026-11-02,17,0,A,B,12,5,4,0.8,0,60
