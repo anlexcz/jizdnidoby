@@ -2,52 +2,81 @@ name: Denní aktualizace
 
 on:
   schedule:
-    - cron: "45 4 * * *"
+    # Primární běh + záložní běh. GitHub scheduled Actions nejsou garantované
+    # na minutu přesně a jednotlivý cron může být výjimečně vynechán.
+    - cron: "37 4 * * *"
+    - cron: "07 6 * * *"
   workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "*.py"
+      - ".github/workflows/daily.yml"
+      - "requirements.txt"
 
 permissions:
   contents: write
 
+concurrency:
+  group: daily-data-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt
-      - name: Otestovat detektor
+
+      - name: Závislosti
+        run: pip install -r requirements.txt
+
+      - name: Testy
         run: python -m unittest discover -s tests -v
+
       - name: Stáhnout předchozí stav
         run: |
           mkdir -p data/state
           gh release download state --pattern "state.csv.gz" --pattern "meta.json" --dir data/state --clobber || echo "Základní stav zatím neexistuje."
           gh release download state --pattern "trip_state.csv.gz" --dir data/state --clobber || echo "Trip state zatím neexistuje."
-          # Starší release mohl mít meta+state bez trip_state. Vynutíme jeden bezpečný
-          # přepočet; bez předchozího trip_state se při něm změny JD nedetekují.
           if [ -f data/state/meta.json ] && [ ! -f data/state/trip_state.csv.gz ]; then
-            echo "Bootstrap trip_state: vynucuji přepočet feedu."
+            echo "Bootstrap trip_state: vynucuji bezpečný přepočet feedu bez detekce JD."
             rm data/state/meta.json
           fi
+
       - name: Spočítat, zkontrolovat a porovnat
-        run: python daily_update_v3.py
-      - name: Zapsat úspěšné načtení a stav dat
+        run: python daily_update.py
+
+      - name: Připravit webové geometrie
+        run: python split_segments.py
+
+      - name: Ověřit nový stav a webová data
+        run: python validate_build.py
+
+      - name: Zapsat úspěšné načtení
         run: |
           day=$(date -u +%F)
           if [ ! -f data/run_log.csv ]; then echo "date" > data/run_log.csv; fi
           grep -qx "$day" data/run_log.csv || echo "$day" >> data/run_log.csv
           python export_status.py
-      - name: Uložit nový stav
+          python validate_build.py
+
+      - name: Uložit nový pracovní stav
         run: |
-          test -f data/state/state.csv.gz
-          test -f data/state/trip_state.csv.gz
-          test -f data/state/meta.json
           gh release view state >/dev/null 2>&1 || gh release create state --title "state" --notes "Interní stav pro denní porovnávání, needitovat." --latest=false
           gh release upload state data/state/state.csv.gz data/state/trip_state.csv.gz data/state/meta.json --clobber
+
       - name: Commit výsledků
         run: |
           git config user.name "github-actions"
