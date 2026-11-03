@@ -23,7 +23,9 @@ jobs:
       - name: Backend tests
         run: python -m unittest discover -s tests -v
       - name: Frontend syntax
-        run: node --check app.js
+        run: |
+          node --check app.js
+          node --check history-status.js
 
   pipeline-smoke:
     if: github.event_name == 'pull_request'
