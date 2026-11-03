@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "description": "Referenční přístupové body tramvajových vozoven pro podpůrnou klasifikaci čistých operation_type=1 variant. Bod sám o sobě není důkaz výjezdu/zátahu.",
+  "depots": [
+    {
+      "id": "hloubetin",
+      "name": "Hloubětín",
+      "points": [
+        {"stop_name": "Starý Hloubětín", "strength": "normal", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Vozovna Hloubětín", "strength": "strong", "can_start_run": true, "can_end_run": true}
+      ]
+    },
+    {
+      "id": "kobylisy",
+      "name": "Kobylisy",
+      "points": [
+        {"stop_name": "Vozovna Kobylisy", "strength": "strong", "can_start_run": true, "can_end_run": true}
+      ]
+    },
+    {
+      "id": "motol",
+      "name": "Motol",
+      "points": [
+        {"stop_name": "Motol", "strength": "normal", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Vozovna Motol", "strength": "strong", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Hotel Golf", "strength": "normal", "can_start_run": true, "can_end_run": true}
+      ]
+    },
+    {
+      "id": "pankrac",
+      "name": "Pankrác",
+      "points": [
+        {"stop_name": "Vozovna Pankrác", "strength": "strong", "can_start_run": true, "can_end_run": true}
+      ]
+    },
+    {
+      "id": "strasnice",
+      "name": "Strašnice",
+      "points": [
+        {"stop_name": "Krematorium Strašnice", "strength": "normal", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Vinice", "strength": "normal", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Vozovna Strašnice", "strength": "strong", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Strašnická", "strength": "weak", "can_start_run": true, "can_end_run": true, "note": "Pouze extrémní/hraniční případy; nikdy neklasifikovat bez dalších silných signálů."}
+      ]
+    },
+    {
+      "id": "stresovice",
+      "name": "Střešovice",
+      "points": [
+        {"stop_name": "Vozovna Střešovice", "strength": "strong", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Brusnice", "strength": "normal", "can_start_run": true, "can_end_run": true}
+      ],
+      "note": "Dlabačov se záměrně nepoužívá jako depot point; je součástí běžné trasy."
+    },
+    {
+      "id": "vokovice",
+      "name": "Vokovice",
+      "points": [
+        {"stop_name": "Vozovna Vokovice", "strength": "strong", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Nad Džbánem", "strength": "normal", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Divoká Šárka", "strength": "normal", "can_start_run": true, "can_end_run": true}
+      ]
+    },
+    {
+      "id": "zizkov",
+      "name": "Žižkov",
+      "points": [
+        {"stop_name": "Vozovna Žižkov", "strength": "strong", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Strážní", "strength": "weak", "can_start_run": true, "can_end_run": true},
+        {"stop_name": "Ohrada", "strength": "weak", "can_start_run": true, "can_end_run": true}
+      ],
+      "note": "Strážní a Ohrada jsou pouze slabé podpůrné body."
+    }
+  ]
+}
