@@ -24,3 +24,31 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Frontend syntax
         run: node --check app.js
+
+  pipeline-smoke:
+    if: github.ref == 'refs/heads/clean-rebuild'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Načíst produkční pracovní snapshot pouze pro čtení
+        run: |
+          mkdir -p data/state
+          gh release download state --pattern "state.csv.gz" --pattern "trip_state.csv.gz" --pattern "meta.json" --dir data/state --clobber
+          # Vynutíme skutečný přepočet proti uloženému snapshotu. V runneru je
+          # pracovní kopie, takže produkční release ani historie se nemění.
+          rm -f data/state/meta.json
+      - name: Projít celou pipeline nad aktuálním GTFS
+        run: |
+          python daily_update.py
+          python split_segments.py
+          python validate_build.py
