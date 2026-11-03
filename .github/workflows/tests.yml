@@ -19,7 +19,7 @@ jobs:
           node-version: "22"
       - run: pip install -r requirements.txt
       - name: Python syntax
-        run: python -m py_compile daily_update.py export_web.py export_status.py validate_build.py split_segments.py change_events.py feed_quality.py shape_geometry.py time_regimes.py tram_segments.py
+        run: python -m py_compile daily_update.py export_web.py export_status.py export_timetables.py validate_build.py split_segments.py change_events.py feed_quality.py shape_geometry.py time_regimes.py tram_segments.py
       - name: Backend tests
         run: python -m unittest discover -s tests -v
       - name: Frontend syntax
@@ -52,5 +52,6 @@ jobs:
       - name: Projít celou pipeline nad aktuálním GTFS
         run: |
           python daily_update.py
+          python export_timetables.py
           python split_segments.py
           python validate_build.py
