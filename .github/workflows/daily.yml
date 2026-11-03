@@ -88,5 +88,17 @@ jobs:
             echo "Žádné změny k uložení."
           else
             git commit -m "Data $(date -u +%F)"
-            git push
+            # Výpočet může trvat několik minut a během něj se může main posunout
+            # např. frontendovým commitem. Datový commit proto před pushnutím
+            # bezpečně přehrajeme nad nejnovější main místo non-fast-forward pádu.
+            for attempt in 1 2 3; do
+              git fetch origin main
+              git rebase origin/main
+              if git push origin HEAD:main; then
+                exit 0
+              fi
+              echo "Push se mezitím znovu střetl s novým commitem; pokus $attempt/3."
+            done
+            echo "Datový commit se nepodařilo bezpečně pushnout po 3 pokusech."
+            exit 1
           fi
