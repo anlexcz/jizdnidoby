@@ -2,8 +2,6 @@ name: Denní aktualizace
 
 on:
   schedule:
-    # Primární běh + záložní běh. GitHub scheduled Actions nejsou garantované
-    # na minutu přesně a jednotlivý cron může být výjimečně vynechán.
     - cron: "37 4 * * *"
     - cron: "07 6 * * *"
   workflow_dispatch: {}
@@ -61,6 +59,9 @@ jobs:
       - name: Archivovat publikovaný GTFS
         run: python archive_gtfs.py
 
+      - name: Klasifikovat trasové varianty
+        run: python classify_variants.py
+
       - name: Archivovat jízdní řády pro historii
         run: python export_timetables.py
 
@@ -94,9 +95,6 @@ jobs:
             echo "Žádné změny k uložení."
           else
             git commit -m "Data $(date -u +%F)"
-            # Výpočet může trvat několik minut a během něj se může main posunout
-            # např. frontendovým commitem. Datový commit proto před pushnutím
-            # bezpečně přehrajeme nad nejnovější main místo non-fast-forward pádu.
             for attempt in 1 2 3; do
               git fetch origin main
               git rebase origin/main
