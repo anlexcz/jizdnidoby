@@ -271,6 +271,9 @@ def archive(observed_on: str | None = None) -> Path:
         raise FileNotFoundError(f"Chybí {source_zip}; spusť nejdřív denní GTFS pipeline.")
 
     feed_hash = _sha256_file(source_zip)
+    # daily_update.py can return early when the downloaded ZIP is byte-identical
+    # to the previous run; in that case data/gtfs may not exist in a fresh runner.
+    ts.unzip(source_zip)
     trips, stop_times, _ = _load_tram_data()
     decorated_trips, variants, variant_stops = _decorate_trips(trips, stop_times)
     legs = _build_legs(stop_times)
