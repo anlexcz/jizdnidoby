@@ -1,132 +1,177 @@
-function routeGraph(line, direction) {
-  const segments = D.segs.filter((segment) => segment.l === line && segment.d === direction);
-  const names = new Map();
-  const outgoing = new Map();
-  const incoming = new Map();
-
-  for (const segment of segments) {
-    names.set(segment.a, segment.n?.[0] || segment.a);
-    names.set(segment.b, segment.n?.[1] || segment.b);
-    if (!outgoing.has(segment.a)) outgoing.set(segment.a, []);
-    outgoing.get(segment.a).push(segment);
-    incoming.set(segment.b, (incoming.get(segment.b) || 0) + 1);
-    if (!incoming.has(segment.a)) incoming.set(segment.a, 0);
-  }
-
-  return { names, outgoing, incoming };
-}
-
-function orderedRouteStops(line, direction) {
-  const graph = routeGraph(line, direction);
-  const result = [];
-  const seen = new Set();
-  const roots = [...graph.names.keys()].filter((id) => (graph.incoming.get(id) || 0) === 0);
-  const queue = roots.length ? [...roots] : [...graph.names.keys()].slice(0, 1);
-
-  while (queue.length) {
-    const id = queue.shift();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    result.push([id, graph.names.get(id) || id]);
-    for (const segment of graph.outgoing.get(id) || []) {
-      if (!seen.has(segment.b)) queue.push(segment.b);
-    }
-  }
-
-  for (const [id, name] of graph.names) {
-    if (!seen.has(id)) result.push([id, name]);
-  }
-  return result;
-}
-
-function reachableRouteStops(line, direction, from) {
-  const graph = routeGraph(line, direction);
-  const result = [];
-  const seen = new Set([from]);
-  const queue = [from];
-
-  while (queue.length) {
-    const id = queue.shift();
-    for (const segment of graph.outgoing.get(id) || []) {
-      if (seen.has(segment.b)) continue;
-      seen.add(segment.b);
-      result.push([segment.b, graph.names.get(segment.b) || segment.b]);
-      queue.push(segment.b);
-    }
-  }
-  return result;
-}
-
-function routeDirectionLabel(line, direction) {
-  const ordered = orderedRouteStops(line, direction);
-  const terminal = ordered.at(-1)?.[1];
-  return terminal ? `${direction} · ${terminal}` : direction;
-}
-
-renderHistory = function renderHistoryWithRouteOrder(values = {}) {
-  const line = values.line || allLines()[0] || '';
-  const direction = values.dir || dirs(line)[0] || '';
-  const stopList = orderedRouteStops(line, direction);
-  const a = values.a && stopList.some(([id]) => id === values.a)
-    ? values.a
-    : stopList[0]?.[0] || '';
-  const reachable = reachableRouteStops(line, direction, a);
-  const b = values.b && reachable.some(([id]) => id === values.b)
-    ? values.b
-    : reachable[0]?.[0] || '';
-  const path = a && b ? findPath(line, direction, a, b) : [];
-  historyPath = path;
-  const current = pathCurrent(path);
-  const changes = historyRows(path, line, direction);
-  let value = current;
-  let rows = '';
-
-  if (current !== null) {
-    rows += `<div class="historyRow"><span>Aktuálně</span><strong>${secs(current)}</strong><span></span></div>`;
-    for (const [detectedOn, change] of changes) {
-      const before = value - change;
-      rows += `<div class="historyRow"><span>${fmtDate(detectedOn)}</span><strong>${secs(before)} → ${secs(value)}</strong><span class="delta ${change > 0 ? 'up' : 'down'}">${delta(change)}</span></div>`;
-      value = before;
-    }
-  }
-
-  const names = path.length ? `${path[0].n?.[0] || a} → ${path[path.length - 1].n?.[1] || b}` : '';
-  $('#panel').innerHTML = `<div class="history">
-    <div class="historyGrid">
-      <div><label>Linka</label><select id="hLine">${allLines().map((item) => `<option ${item === line ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select></div>
-      <div><label>Směr</label><select id="hDir">${dirs(line).map((item) => `<option value="${esc(item)}" ${item === direction ? 'selected' : ''}>${esc(routeDirectionLabel(line, item))}</option>`).join('')}</select></div>
-      <div><label>Zastávka A</label><select id="hA">${stopList.map(([id, name]) => `<option value="${esc(id)}" ${id === a ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></div>
-      <div><label>Zastávka B</label><select id="hB">${reachable.map(([id, name]) => `<option value="${esc(id)}" ${id === b ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></div>
-      <div class="wide">
-        <div class="filters"><button data-hday="w" class="${dtype === 'w' ? 'on' : ''}">Po–Pá</button><button data-hday="s" class="${dtype === 's' ? 'on' : ''}">So</button><button data-hday="n" class="${dtype === 'n' ? 'on' : ''}">Ne</button></div>
-        <label>Hodina · <b>${hour}:00</b></label><input id="hHr" type="range" min="4" max="25" value="${hour}">
-      </div>
-    </div>
-    ${!path.length
-      ? `<div class="empty">Pro tuto zastávku už ve zvoleném směru není další dostupný úsek.</div>`
-      : `<div class="historyResult"><div class="meta">${esc(names)} · ${path.length} mezizastávkových úseků</div>${current === null
-        ? `<div class="empty">Pro zvolený typ dne a hodinu nemám úplnou aktuální jízdní dobu.</div>`
-        : rows + (changes.length ? '' : `<div class="empty">V evidované historii zatím na tomto úseku není potvrzená změna.</div>`)}<div class="historyPath">Historie zachycuje změny od začátku evidence projektu, nikoli období před jejím spuštěním.</div></div>`}
-  </div>`;
-  bindHistory(line, direction, a, b);
-  draw();
+const timetableHistory = {
+  index: null,
+  lines: new Map(),
 };
 
-bindHistory = function bindHistoryWithReachability(line, direction, a, b) {
+async function ensureTimetableIndex() {
+  if (timetableHistory.index) return timetableHistory.index;
+  timetableHistory.index = await loadJson('data/web/timetable_index.json', null, false);
+  return timetableHistory.index;
+}
+
+async function ensureTimetableLine(line) {
+  if (timetableHistory.lines.has(line)) return timetableHistory.lines.get(line);
+  const index = await ensureTimetableIndex();
+  const entry = index?.lines?.[line];
+  if (!entry?.file) return null;
+  const payload = await loadJson(`data/web/${entry.file}`, null, false);
+  if (payload) timetableHistory.lines.set(line, payload);
+  return payload;
+}
+
+function timetableLines() {
+  const lines = Object.keys(timetableHistory.index?.lines || {});
+  return (lines.length ? lines : allLines()).sort((a, b) => a.localeCompare(b, 'cs', { numeric: true }));
+}
+
+function timetableDirections(payload) {
+  return [...new Set(Object.values(payload?.dates || {}).flatMap((day) => Object.keys(day || {})))].sort();
+}
+
+function timetableDirectionLabel(payload, direction) {
+  const dates = Object.keys(payload?.dates || {}).sort().reverse();
+  for (const date of dates) {
+    const snapshot = payload.dates?.[date]?.[direction];
+    const terminal = snapshot?.stops?.at(-1)?.[1];
+    if (terminal) return `${direction} · ${terminal}`;
+  }
+  return direction;
+}
+
+function routeSegmentKey(a, b) {
+  return `${a}|${b}`;
+}
+
+function minuteValue(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '') return null;
+  return Math.round(Number(seconds) / 60);
+}
+
+function commonValue(values) {
+  const counts = new Map();
+  for (const value of values) {
+    if (value === null) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? null;
+}
+
+function timetableBaselines(payload, direction) {
+  const samples = new Map();
+  for (const day of Object.values(payload?.dates || {})) {
+    const snapshot = day?.[direction];
+    if (!snapshot?.stops?.length) continue;
+    const values = snapshot.hours?.[String(hour)] || [];
+    for (let i = 0; i < snapshot.stops.length - 1; i += 1) {
+      const a = snapshot.stops[i]?.[0];
+      const b = snapshot.stops[i + 1]?.[0];
+      const value = minuteValue(values[i]);
+      if (!a || !b || value === null) continue;
+      const key = routeSegmentKey(a, b);
+      if (!samples.has(key)) samples.set(key, []);
+      samples.get(key).push(value);
+    }
+  }
+  return new Map([...samples].map(([key, values]) => [key, commonValue(values)]));
+}
+
+function routeStrip(snapshot, baselines) {
+  if (!snapshot?.stops?.length) return '<div class="routeEmpty">Trasa není v tomto dni dostupná.</div>';
+  const values = snapshot.hours?.[String(hour)] || [];
+  let html = '<div class="routeStrip">';
+  for (let i = 0; i < snapshot.stops.length; i += 1) {
+    const [stopId, stopName] = snapshot.stops[i];
+    html += `<div class="routeStop" title="${esc(stopId)}">${esc(stopName)}</div>`;
+    if (i >= snapshot.stops.length - 1) continue;
+
+    const nextId = snapshot.stops[i + 1]?.[0];
+    const value = minuteValue(values[i]);
+    const baseline = baselines.get(routeSegmentKey(stopId, nextId));
+    const diff = value !== null && baseline !== null && baseline !== undefined ? value - baseline : 0;
+    const diffText = diff > 0 ? `(+${diff})` : diff < 0 ? `(${diff})` : '';
+    const cls = diff > 0 ? 'up' : diff < 0 ? 'down' : '';
+    html += `<div class="routeTime ${cls}"><b>${value === null ? '–' : value}</b>${diffText ? `<span>${diffText}</span>` : ''}</div>`;
+  }
+  return `${html}</div>`;
+}
+
+function updateHistoryMap(line, direction, payload) {
+  const dates = Object.keys(payload?.dates || {}).sort().reverse();
+  const snapshot = dates.map((date) => payload.dates?.[date]?.[direction]).find((item) => item?.stops?.length);
+  if (!snapshot) {
+    historyPath = [];
+    draw();
+    return;
+  }
+  const path = [];
+  for (let i = 0; i < snapshot.stops.length - 1; i += 1) {
+    const a = snapshot.stops[i][0];
+    const b = snapshot.stops[i + 1][0];
+    const segment = segMap.get(key(line, direction, a, b));
+    if (segment) path.push(segment);
+  }
+  historyPath = path;
+  draw();
+}
+
+showHistory = async function showTimetableHistory(values = {}) {
+  await ensureTimetableIndex();
+  const lines = timetableLines();
+  const line = values.line && lines.includes(values.line) ? values.line : lines[0] || '';
+  if (line) await ensureLines([line]);
+  const payload = line ? await ensureTimetableLine(line) : null;
+  renderHistory({ line, dir: values.dir, payload });
+};
+
+renderHistory = function renderDailyTimetableHistory(values = {}) {
+  const lines = timetableLines();
+  const line = values.line || lines[0] || '';
+  const payload = values.payload || timetableHistory.lines.get(line);
+
+  if (!payload) {
+    $('#panel').innerHTML = `<div class="history"><div class="historyGrid"><div><label>Linka</label><select id="hLine">${lines.map((item) => `<option ${item === line ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select></div></div><div class="empty">Historický přehled jízdních řádů se právě vytváří. Po nejbližším úspěšném datovém běhu se tu objeví jednotlivé dny a celé trasy.</div></div>`;
+    if ($('#hLine')) $('#hLine').onchange = (event) => showHistory({ line: event.target.value });
+    return;
+  }
+
+  const directions = timetableDirections(payload);
+  const direction = values.dir && directions.includes(values.dir) ? values.dir : directions[0] || '';
+  const dates = Object.keys(payload.dates || {}).filter((date) => payload.dates?.[date]?.[direction]).sort().reverse();
+  const baselines = timetableBaselines(payload, direction);
+  const firstDate = dates.at(-1);
+  const lastDate = dates[0];
+  const coverage = dates.length
+    ? `${dates.length} ${dates.length === 1 ? 'den' : dates.length < 5 ? 'dny' : 'dnů'} · ${fmtDate(firstDate)}–${fmtDate(lastDate)}`
+    : 'Pro tento směr zatím nejsou archivované dny.';
+
+  $('#panel').innerHTML = `<div class="history timetableHistory">
+    <div class="historyGrid timetableControls">
+      <div><label>Linka</label><select id="hLine">${lines.map((item) => `<option ${item === line ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select></div>
+      <div><label>Směr</label><select id="hDir">${directions.map((item) => `<option value="${esc(item)}" ${item === direction ? 'selected' : ''}>${esc(timetableDirectionLabel(payload, item))}</option>`).join('')}</select></div>
+      <div class="wide">
+        <label>Hodina · <b>${hour}:00</b></label>
+        <input id="hHr" type="range" min="4" max="25" value="${hour}">
+      </div>
+    </div>
+    <div class="historyCoverage">
+      <strong>Dostupná historie</strong><span>${esc(coverage)}</span>
+      <small>Každý řádek je konkrétní den. Číslo mezi zastávkami je jízdní doba v minutách; závorka ukazuje rozdíl proti nejčastější hodnotě daného úseku v evidované historii.</small>
+    </div>
+    <div class="timetableDays">
+      ${dates.length ? dates.map((date) => `<section class="timetableDay">
+        <div class="timetableDate"><strong>${fmtDate(date)}</strong><span>${new Date(`${date}T12:00:00`).toLocaleDateString('cs-CZ', { weekday: 'short' })}</span></div>
+        <div class="timetableRoute">${routeStrip(payload.dates[date][direction], baselines)}</div>
+      </section>`).join('') : '<div class="empty">Pro tento směr zatím nejsou archivované dny.</div>'}
+    </div>
+  </div>`;
+
   if ($('#hLine')) $('#hLine').onchange = (event) => showHistory({ line: event.target.value });
   if ($('#hDir')) $('#hDir').onchange = (event) => showHistory({ line, dir: event.target.value });
-  if ($('#hA')) $('#hA').onchange = (event) => showHistory({ line, dir: direction, a: event.target.value });
-  if ($('#hB')) $('#hB').onchange = (event) => showHistory({ line, dir: direction, a, b: event.target.value });
-  $$('[data-hday]').forEach((button) => {
-    button.onclick = () => {
-      dtype = button.dataset.hday;
-      showHistory({ line, dir: direction, a, b });
-    };
-  });
   if ($('#hHr')) $('#hHr').oninput = (event) => {
     hour = +event.target.value;
-    showHistory({ line, dir: direction, a, b });
+    renderHistory({ line, dir: direction, payload });
   };
+  updateHistoryMap(line, direction, payload);
 };
 
 renderStatus = function renderDataHealth() {
