@@ -19,9 +19,11 @@ jobs:
           node-version: "22"
       - run: pip install -r requirements.txt
       - name: Python syntax
-        run: python -m py_compile daily_update.py archive_gtfs.py classify_variants.py export_web.py export_status.py export_timetables.py validate_build.py split_segments.py change_events.py feed_quality.py shape_geometry.py time_regimes.py tram_segments.py
+        run: python -m py_compile daily_update.py archive_gtfs.py classify_variants.py audit_classifications.py export_web.py export_status.py export_timetables.py validate_build.py split_segments.py change_events.py feed_quality.py shape_geometry.py time_regimes.py tram_segments.py
       - name: Backend tests
         run: python -m unittest discover -s tests -v
+      - name: Audit klasifikace
+        run: python audit_classifications.py
       - name: Frontend syntax
         run: |
           node --check app.js
