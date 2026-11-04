@@ -1,4 +1,5 @@
 name: Denní aktualizace
+# Registrace plánovaného workflow ověřena 2026-11-04; bez změny chování.
 
 on:
   schedule:
