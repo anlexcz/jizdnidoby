@@ -90,7 +90,7 @@ def build_day(
     trips. Keep exact stop order, including repeated stops and loops.
     """
     classified = classified[
-        classified["line"].astype(str).str.fullmatch(r"\\d+").fillna(False)
+        classified["line"].astype(str).str.fullmatch(r"\d+").fillna(False)
     ].copy()
     classified = classified[
         classified["line"].astype(int).between(1, 37)
