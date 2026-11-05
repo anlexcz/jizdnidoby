@@ -123,6 +123,117 @@ showHistory = async function showTimetableHistory(values = {}) {
   renderHistory({ line, dir: values.dir, payload });
 };
 
+
+/* Mobile route explorer: one fixed stop axis and a shared horizontal date grid.
+   Keep the desktop timetable unchanged. */
+function primaryTimetableSnapshot(payload, direction) {
+  const groups = new Map();
+  for (const [date, day] of Object.entries(payload?.dates || {})) {
+    const snapshot = day?.[direction];
+    if (!snapshot?.stops || snapshot.stops.length < 2) continue;
+    const signature = JSON.stringify(snapshot.stops.map((stop) => String(stop[0])));
+    if (!groups.has(signature)) groups.set(signature, { count: 0, date, snapshot });
+    const group = groups.get(signature);
+    group.count += 1;
+    if (date > group.date) {
+      group.date = date;
+      group.snapshot = snapshot;
+    }
+  }
+  return [...groups.values()].sort((a, b) =>
+    b.count - a.count || b.date.localeCompare(a.date)
+  )[0]?.snapshot || null;
+}
+
+function timetableSegmentValues(snapshot, selectedHour) {
+  const result = new Map();
+  const stops = snapshot?.stops || [];
+  const values = snapshot?.hours?.[String(selectedHour)] || [];
+  for (let index = 0; index < stops.length - 1; index += 1) {
+    const a = stops[index]?.[0];
+    const b = stops[index + 1]?.[0];
+    if (a && b) result.set(routeSegmentKey(a, b), minuteValue(values[index]));
+  }
+  return result;
+}
+
+function localIsoDay(offset = 0) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Prague', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const target = new Date(Date.UTC(+fields.year, +fields.month - 1, +fields.day + offset));
+  return target.toISOString().slice(0, 10);
+}
+
+function precedingIsoDay(value) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function mobileTimetableExplorer(payload, direction, dates) {
+  const main = primaryTimetableSnapshot(payload, direction);
+  if (!main) return '<div class="routeEmpty">Pro tento směr zatím není dostupná hlavní trasa.</div>';
+
+  const yesterday = localIsoDay(-1);
+  const today = localIsoDay();
+  const available = dates.slice().sort();
+  // Start at yesterday, but allow browsing the oldest retained data if yesterday is unavailable.
+  const days = available.filter((date) => date >= yesterday);
+  const visibleDays = days.length ? days : available;
+  const values = new Map(available.map((date) =>
+    [date, timetableSegmentValues(payload.dates[date][direction], hour)]
+  ));
+  const formatDay = (date) => new Date(`${date}T12:00:00Z`)
+    .toLocaleDateString('cs-CZ', { timeZone: 'UTC', day: 'numeric', month: 'numeric' });
+  const labelDay = (date) => date === yesterday ? 'Včera' :
+    date === today ? 'Dnes' : date === localIsoDay(1) ? 'Zítra' :
+      new Date(`${date}T12:00:00Z`).toLocaleDateString('cs-CZ', {
+        timeZone: 'UTC', weekday: 'short',
+      });
+  const columns = `174px repeat(${visibleDays.length}, 78px)`;
+  let rows = `<div class="explorerGrid" style="grid-template-columns:${columns}">`;
+  rows += '<div class="explorerCorner">HLAVNÍ TRASA</div>';
+  for (const date of visibleDays) {
+    rows += `<div class="explorerDay ${date === today ? 'isToday' : ''}">
+      <strong>${esc(labelDay(date))}</strong><span>${esc(formatDay(date))}</span></div>`;
+  }
+
+  for (let i = 0; i < main.stops.length; i += 1) {
+    const stop = main.stops[i];
+    rows += `<div class="explorerStop"><span class="explorerDot"></span>
+      <span class="explorerStopName" title="${esc(stop[1])}">${esc(stop[1])}</span></div>`;
+    rows += visibleDays.map((date) => `<div class="explorerStopCell ${date === today ? 'isToday' : ''}"></div>`).join('');
+    if (i === main.stops.length - 1) continue;
+    const segment = routeSegmentKey(stop[0], main.stops[i + 1][0]);
+    rows += '<div class="explorerAxis"><span class="explorerRail"></span><small>min</small></div>';
+    for (const date of visibleDays) {
+      const current = values.get(date)?.get(segment);
+      // A different route or absent hour is not a zero-minute trip.
+      const previous = values.get(precedingIsoDay(date))?.get(segment);
+      const difference = current != null && previous != null ? current - previous : 0;
+      const state = difference > 0 ? 'increased' : difference < 0 ? 'decreased' : '';
+      const changeText = difference > 0 ? `+${difference}` : String(difference);
+      rows += `<div class="explorerValue ${state} ${date === today ? 'isToday' : ''}"
+        title="${esc(date)} · ${esc(stop[1])} → ${esc(main.stops[i + 1][1])}">
+        <strong>${current == null ? '–' : current}</strong>
+        ${state ? `<span>${esc(changeText)}</span>` : ''}
+      </div>`;
+    }
+  }
+  rows += '</div>';
+  return `<section class="mobileExplorer" aria-label="Průzkum jízdních dob po dnech">
+    <div class="explorerSummary">Hlavní trasa · ${main.stops.length} zastávek
+      <span>Posuň dny vodorovně →</span></div>
+    <div class="explorerScroll" tabindex="0" aria-label="Posuvné sloupce dnů">${rows}</div>
+    <p class="explorerNote"><b class="up">Červená</b> = prodloužení,
+      <b class="down">tyrkysová</b> = zkrácení oproti předchozímu kalendářnímu dni.
+      Pomlčka znamená chybějící srovnatelný údaj. Zastávková osa odpovídá
+      nejčastější archivované variantě, nikoli výlukovým odklonům.</p>
+  </section>`;
+}
+
 renderHistory = function renderDailyTimetableHistory(values = {}) {
   const lines = timetableLines();
   const line = values.line || lines[0] || '';
@@ -157,7 +268,8 @@ renderHistory = function renderDailyTimetableHistory(values = {}) {
       <strong>Dostupná historie</strong><span>${esc(coverage)}</span>
       <small>Každý řádek je konkrétní den. Číslo mezi zastávkami je jízdní doba v minutách; závorka ukazuje rozdíl proti nejčastější hodnotě daného úseku v evidované historii.</small>
     </div>
-    <div class="timetableDays">
+    ${mobileTimetableExplorer(payload, direction, dates)}
+    <div class="timetableDays desktopTimetableDays">
       ${dates.length ? dates.map((date) => `<section class="timetableDay">
         <div class="timetableDate"><strong>${fmtDate(date)}</strong><span>${new Date(`${date}T12:00:00`).toLocaleDateString('cs-CZ', { weekday: 'short' })}</span></div>
         <div class="timetableRoute">${routeStrip(payload.dates[date][direction], baselines)}</div>
