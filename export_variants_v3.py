@@ -89,6 +89,12 @@ def build_day(
     An exported regular variant must be classified as regular and have clean
     trips. Keep exact stop order, including repeated stops and loops.
     """
+    classified = classified[
+        classified["line"].astype(str).str.fullmatch(r"\\d+").fillna(False)
+    ].copy()
+    classified = classified[
+        classified["line"].astype(int).between(1, 37)
+    ]
     classes = classified[
         classified["classification"].isin(REGULAR)
         & classified["clean_trip_count"].gt(0)
