@@ -82,6 +82,36 @@ def validate_segment_shards(legacy_segments: list) -> None:
         )
 
 
+def validate_variants_v3() -> None:
+    index = read_json(WEB / "timetable_variants_v3_index.json")
+    if index.get("version") != 3 or not isinstance(index.get("lines"), dict):
+        raise SystemExit("Index variant tras v3 nema podporovany format.")
+    if not index["lines"]:
+        raise SystemExit("V exportu variant tras v3 chybi linky.")
+    for line, entry in index["lines"].items():
+        if not str(line).isdigit() or not 1 <= int(line) <= 37:
+            raise SystemExit(f"V exportu v3 je neplatna denni linka: {line}.")
+        payload = read_json(WEB / entry["file"])
+        if payload.get("version") != 3 or str(payload.get("line")) != str(line):
+            raise SystemExit(f"Nesouhlasi identita exportu v3 pro linku {line}.")
+        for date, directions in payload.get("dates", {}).items():
+            for direction, value in directions.items():
+                seen = set()
+                for variant in value.get("variants", []):
+                    variant_id = variant.get("id")
+                    stops = variant.get("stops", [])
+                    if not variant_id or variant_id in seen or len(stops) < 2:
+                        raise SystemExit(f"Vadna varianta {line}/{date}/{direction}.")
+                    seen.add(variant_id)
+                    if variant.get("classification") not in {"regular_base", "regular_day_variant"}:
+                        raise SystemExit(f"Neregularni spoj v hlavnim exportu {line}/{date}/{direction}.")
+                    if variant.get("trip_count", 0) <= 0:
+                        raise SystemExit(f"Varianta bez spoju {line}/{date}/{direction}.")
+                    for hour, seconds in variant.get("hours", {}).items():
+                        if len(seconds) != len(stops) - 1:
+                            raise SystemExit(f"Nesouhlasi pocet useku {line}/{date}/{direction}/{hour}.")
+
+
 def validate_web() -> None:
     current = read_json(WEB / "current.json")
     segments = read_json(WEB / "segments.json")
@@ -95,6 +125,7 @@ def validate_web() -> None:
     if not isinstance(current, dict) or not isinstance(current.get("v"), dict):
         raise SystemExit("current.json nemá očekávaný formát.")
     validate_segment_shards(segments)
+    validate_variants_v3()
 
     # Historické geometrie jsou append-only archiv. Záznam v logu nesmí ukazovat
     # na neexistující soubor; validátor ale žádný starý soubor nemaže ani nepřepisuje.
