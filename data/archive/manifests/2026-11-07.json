@@ -1,0 +1,27 @@
+{
+  "downloaded_at_utc": "2026-11-07T11:23:01+00:00",
+  "feed_hash_sha256": "47f35d199088c22f849840f727a97a75c942d5268fa6377ecbf6a44e476722c3",
+  "feed_info": {},
+  "observed_on": "2026-11-07",
+  "schema_version": 1,
+  "service_date_from": "2026-11-07",
+  "service_date_to": "2026-11-20",
+  "service_dates": {
+    "2026-11-07": "524762da97648d6dd05c87f2",
+    "2026-11-08": "48ce952b9b63b6d8d2030e69",
+    "2026-11-09": "afd076ceed40f0fcae7fe3da",
+    "2026-11-10": "1d0ff08344745b6850370615",
+    "2026-11-11": "abe5ff3bc716434f377af505",
+    "2026-11-12": "70515fc415ad24f309e7913e",
+    "2026-11-13": "fe4e45795c0cca9156a1fc93",
+    "2026-11-14": "7b45a4991d06d2a9c304bb44",
+    "2026-11-15": "c7a780986e11831de8a64cae",
+    "2026-11-16": "fe4e45795c0cca9156a1fc93",
+    "2026-11-17": "2a9392f30f0eb20252a917f7",
+    "2026-11-18": "fe4e45795c0cca9156a1fc93",
+    "2026-11-19": "fe4e45795c0cca9156a1fc93",
+    "2026-11-20": "fe4e45795c0cca9156a1fc93"
+  },
+  "source_url": "https://data.pid.cz/PID_GTFS.zip",
+  "unique_snapshot_count": 10
+}
